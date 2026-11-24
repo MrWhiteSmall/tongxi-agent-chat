@@ -132,12 +132,31 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   const mention = await request('A', 'rooms/' + dm + '/messages', {text:'@B 来看看',mentions:['B','C']}, 201);
   assert.deepEqual((await request('B', 'rooms/' + dm)).messages.find(message => message.id === mention.id).mentions, ['B']);
 
+  const multiple = new FormData();
+  multiple.set('message', JSON.stringify({text:'两份附件'}));
+  multiple.append('file', new Blob(['first']), 'first.txt');
+  multiple.append('file', new Blob(['last']), 'last.txt');
+  const multiRes = await fetch(server.base + '/api/rooms/' + dm + '/messages', {
+    method:'POST', headers:{Authorization:'Bearer ' + tokens.A}, body:multiple
+  });
+  assert.equal(multiRes.status, 201);
+  const { id: multiId } = await multiRes.json();
+  const multi = (await request('B', 'rooms/' + dm)).messages.find(item => item.id === multiId);
+  assert.deepEqual(multi.attachments.map(file => file.name), ['first.txt','last.txt']);
+  await request('A', 'rooms/' + dm + '/recall', {message: multiId});
+  for (const item of multi.attachments) {
+    const res = await fetch(server.base + '/api/rooms/' + dm + '/attachment?preview=1&id=' + item.id, {
+      headers:{Authorization:'Bearer ' + tokens.B}
+    });
+    assert.equal(res.status, 404);
+  }
+
   const cleanupUrl = server.base + '/internal/daily-cleanup';
   assert.equal((await fetch(cleanupUrl, {method:'POST'})).status, 404);
   const cleanupHeaders = {Authorization:'Bearer test-cleanup-token'};
   const cleanup = await fetch(cleanupUrl, {method:'POST',headers:cleanupHeaders});
   assert.equal(cleanup.status, 200);
-  assert.equal((await cleanup.json()).deleted, 1);
+  assert.equal((await cleanup.json()).deleted, 3);
   assert.deepEqual(await readdir(join(directory, 'attachments')), []);
   for (const room of [dm,team]) {
     const snapshot = await request('A', 'rooms/' + room);

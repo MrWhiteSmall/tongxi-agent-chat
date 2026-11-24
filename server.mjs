@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { attachments, attachmentPreviewType, imageMime, maxFileBytes } from './adapters/attachments.mjs';
 import { bailianCommand, bailianEnabled, bailianImageUrl, bailianMediaUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
+import { mediaMcpEnabled } from './adapters/media-mcp.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acceptsImages, directory, runAgent } from './adapters/index.mjs';
 
@@ -41,6 +42,10 @@ function fail(status, message) {
 
 function plain(value, max) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+function attachmentsOf(message) {
+  return message.attachments || (message.attachment ? [message.attachment] : []);
 }
 
 function roomMessage(room, sender, kind, text, extra = {}) {
@@ -103,17 +108,21 @@ function isImageReference(file) {
   return !file.revoked && Boolean(file.remoteImage || file.imageMime || /\.(png|jpe?g|gif|webp)$/i.test(file.name));
 }
 
-async function imageInputs(files, signal, readBytes) {
+async function imageInputs(files, signal, readBytes, mediaMode = false) {
   const result = [];
-  let remaining = maxFileBytes;
+  const limit = mediaMode ? 10 : 2;
+  let remaining = mediaMode ? 20_000_000 : maxFileBytes;
   for (const file of files) {
     if (!isImageReference(file)) continue;
     if (file.remoteImage) {
-      if (result.length < 2) result.push({ name: file.name, ...(readBytes ? { url: file.remoteImage } : {}) });
+      if (result.length < limit) result.push({ name: file.name, ...(readBytes ? { url: file.remoteImage } : {}) });
       continue;
     }
     if (!readBytes) { result.push({ name: file.name }); continue; }
-    if (file.size > remaining || result.length >= 2) continue;
+    if (file.size > remaining || result.length >= limit) {
+      if (mediaMode) throw new Error('参考图超过数量或大小限制，请缩小或减少图片');
+      continue;
+    }
     try {
       const input = file.storage ? await storage.get(file.id) : Readable.from([Buffer.from(file.data, 'base64')]);
       const chunks = [];
@@ -144,12 +153,16 @@ async function execute(task, context, files, existingImages, command, quoted) {
   const agent = directory.get(task.agent);
   const controller = new AbortController();
   active.set(task.id, controller);
-  const timeout = setTimeout(() => controller.abort(), ['video', 'intent'].includes(command?.kind) ? 480_000 : 240_000);
+  const timeout = setTimeout(() => controller.abort(), ['video', 'intent'].includes(command?.kind) ? 900_000 : 240_000);
   task.status = 'running';
   save();
   try {
-    let images = existingImages || await imageInputs(files, controller.signal, bailianUsesImages(command) || (!command && acceptsImages(agent)) ||
-      (!task.parent && room.kind === 'team' && room.agents.some(id => acceptsImages(directory.get(id) || {}))));
+    const useMcp = mediaMcpEnabled && ['intent', 'image', 'edit', 'video'].includes(command?.kind);
+    const assetCount = files.filter(isImageReference).length;
+    if (useMcp && assetCount > 10) throw new Error('最多使用 10 张参考图片');
+    let images = existingImages || await imageInputs(files, controller.signal, !useMcp &&
+      (bailianUsesImages(command) || (!command && acceptsImages(agent)) ||
+        (!task.parent && room.kind === 'team' && room.agents.some(id => acceptsImages(directory.get(id) || {})))), useMcp);
     const system = '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules;
     const status = progress => { task.progress = progress; save(); };
     let action = command;
@@ -157,7 +170,7 @@ async function execute(task, context, files, existingImages, command, quoted) {
       status('正在分析是否需要调用工具。');
       action = await chooseBailianAction(command, images, quoted, controller.signal);
       if (!action && command.manual) throw new Error('请指定百炼操作，例如 /百炼 生图、/百炼 改图、/百炼 视频或 /百炼 搜索');
-      if (bailianUsesImages(action) || (!action && acceptsImages(agent))) {
+      if ((bailianUsesImages(action) && !useMcp) || (!action && acceptsImages(agent))) {
         images = await imageInputs(files, controller.signal, true);
       }
       if (action?.kind === 'video' && Object.values(state.tasks).some(item => item.id !== task.id &&
@@ -201,12 +214,20 @@ async function execute(task, context, files, existingImages, command, quoted) {
         material + '\n\n百炼联网搜索的参考结果：\n' + evidence, controller.signal, images);
       result += bailianSourceList(found.sources);
     } else if (action) {
+      if (useMcp && bailianUsesImages(action)) {
+        images = await imageInputs(files, controller.signal, true, true);
+        if (images.length !== assetCount) throw new Error('有参考图无法读取，请检查附件或重新上传');
+      }
       if (action.kind === 'video') {
+        if (useMcp && /首[尾末]帧|首帧.*(?:尾|末)帧/.test(command.prompt) && /(?:参考图|参考素材)/.test(command.prompt) &&
+            (assetCount > 2 || /同时|另外|外加|再加/.test(command.prompt))) {
+          throw new Error('当前模型不能同时使用严格首尾帧和额外参考图，请选择一种方式');
+        }
         const expectsImage = files.some(isImageReference) ||
           /(?:原图|上图|参考图|这[张个幅](?:图|照|画)|图中|图里的|照片里)/.test(command.prompt);
         action = { ...action, requiresImage: expectsImage };
       }
-      result = await runBailian(action, images, controller.signal, status);
+      result = await runBailian(action, images, controller.signal, status, assetCount);
     } else {
       result = await runAgent(agent, system, material, controller.signal, images);
     }
@@ -298,16 +319,17 @@ async function cleanup() {
   } finally { cleaning = false; }
 }
 
-const multipartLimit = maxFileBytes + 80_000;
+const maxAttachmentTotal = 18_000_000;
+const multipartLimit = maxAttachmentTotal + 80_000;
 
 async function multipart(req) {
-  if (Number(req.headers['content-length']) > multipartLimit) fail(413, '单个文件必须小于 10 MB');
+  if (Number(req.headers['content-length']) > multipartLimit) fail(413, '附件合计最多 18 MB');
   const source = Readable.toWeb(req);
   let size = 0;
   const limited = source.pipeThrough(new TransformStream({
     transform(chunk, output) {
       size += chunk.byteLength;
-      if (size > multipartLimit) throw Object.assign(new Error('单个文件必须小于 10 MB'), { status: 413 });
+      if (size > multipartLimit) throw Object.assign(new Error('附件合计最多 18 MB'), { status: 413 });
       output.enqueue(chunk);
     }
   }));
@@ -317,17 +339,19 @@ async function multipart(req) {
   let form;
   try { form = await request.formData(); }
   catch (error) {
-    if (size > multipartLimit) fail(413, '单个文件必须小于 10 MB');
+    if (size > multipartLimit) fail(413, '附件合计最多 18 MB');
     fail(400, '上传数据无效');
   }
-  const file = form.get('file');
-  if (!(file instanceof File) || !file.size) fail(400, '请选择非空文件');
-  if (file.size >= maxFileBytes) fail(413, '单个文件必须小于 10 MB');
+  const files = form.getAll('file');
+  if (!files.length || files.some(file => !(file instanceof File) || !file.size)) fail(400, '请选择非空文件');
+  if (files.length > 4) fail(413, '一条消息最多附加 4 个文件');
+  if (files.some(file => file.size >= maxFileBytes)) fail(413, '单个文件必须小于 10 MB');
+  if (files.reduce((sum, file) => sum + file.size, 0) > maxAttachmentTotal) fail(413, '附件合计最多 18 MB');
   let message;
   try { message = JSON.parse(form.get('message')); }
   catch { fail(400, '消息格式无效'); }
   if (!message || typeof message !== 'object' || Array.isArray(message)) fail(400, '消息格式无效');
-  return { message, file };
+  return { message, files };
 }
 
 createServer(async (req, res) => {
@@ -414,10 +438,14 @@ createServer(async (req, res) => {
     if (!action && req.method === 'GET') {
       const tasks = Object.values(state.tasks).filter(task => task.room === room.id && task.status).map(({ html, result, ...task }) => ({ ...task, ...(task.parent && result ? { preview: result.slice(0, 900) } : {}) }));
       const messages = room.messages.slice(-200).map(message => {
-        const file = message.attachment && state.files?.[message.attachment.id];
-        if (file && !file.revoked) {
-          return { ...message, attachment: { ...message.attachment, size: file.size ?? (file.data ? Buffer.byteLength(file.data, 'base64') : undefined), previewType: attachmentPreviewType(file) } };
-        }
+        const files = attachmentsOf(message).flatMap(attachment => {
+          const file = state.files?.[attachment.id];
+          return !file || file.revoked ? [] : [{
+            ...attachment, size: file.size ?? (file.data ? Buffer.byteLength(file.data, 'base64') : undefined),
+            previewType: attachmentPreviewType(file)
+          }];
+        });
+        if (files.length) return { ...message, attachment: files[0], attachments: files };
         const task = message.kind === 'agent' && state.tasks[message.task];
         if (!task || task.room !== room.id || !['bailian-image', 'bailian-edit', 'bailian-video'].includes(task.capability)) return message;
         const kind = task.capability === 'bailian-video' ? 'video' : 'image';
@@ -452,12 +480,13 @@ createServer(async (req, res) => {
       return await pipeline(source, res);
     }
     if (req.method !== 'POST') fail(404, '接口不存在');
-    let input, upload;
+    let input;
+    let uploads = [];
     if (action === 'messages' && req.headers['content-type']?.startsWith('multipart/form-data;')) {
       if (activeUploads >= 3) fail(429, '有其他文件正在上传，请稍后重试');
       activeUploads++;
       uploadSlot = true;
-      ({ message: input, file: upload } = await multipart(req));
+      ({ message: input, files: uploads } = await multipart(req));
     } else {
       input = await body(req, action === 'messages' && storage.kind === 'disk' ? 1_600_000 : undefined);
     }
@@ -468,10 +497,12 @@ createServer(async (req, res) => {
       const message = room.messages[index];
       if (message.kind !== 'human' || message.sender !== user) fail(403, '只能撤回自己发送的消息');
       if (!message.recalled) {
-        const file = message.attachment && state.files?.[message.attachment.id];
-        if (file) {
-          file.revoked = true;
-          if (file.data) delete file.data;
+        for (const item of attachmentsOf(message)) {
+          const file = state.files?.[item.id];
+          if (file) {
+            file.revoked = true;
+            if (file.data) delete file.data;
+          }
         }
         if (message.artifact && state.tasks[message.task]?.room === room.id) {
           delete state.tasks[message.task];
@@ -506,24 +537,23 @@ createServer(async (req, res) => {
     }
     if (action === 'messages') {
       const content = plain(input.text, 6000);
-      if (!content && !input.file && !upload) fail(400, '请输入消息');
+      if (!content && !input.file && !uploads.length) fail(400, '请输入消息');
       const replyId = plain(input.replyTo, 80);
       const quoted = replyId && room.messages.find(item => item.id === replyId && item.kind !== 'event' && !item.recalled);
       if (replyId && !quoted) fail(404, '引用消息已不存在');
-      let attachment;
-      let fileBytes;
-      if (input.file && storage.kind === 'oss') fail(415, '请使用文件上传接口');
-      if (upload) {
+      const items = uploads.map(upload => {
         const name = plain(upload.name, 130);
         if (!name) fail(400, '文件名无效');
-        attachment = { id: randomUUID(), name, size: upload.size, storage: storage.kind };
-      } else if (input.file) {
+        return { id: randomUUID(), name, size: upload.size, storage: storage.kind };
+      });
+      if (input.file) {
+        if (storage.kind === 'oss' || uploads.length) fail(415, '请使用文件上传接口');
         const name = plain(input.file.name, 130);
         const encoded = input.file.data;
         if (!name || typeof encoded !== 'string' || encoded.length > 1_400_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) fail(400, '文件无效或超过 1 MB');
         if (Buffer.from(encoded, 'base64').length > 1_048_576) fail(400, '文件超过 1 MB');
         if (Object.keys(state.files || {}).length >= 100) fail(413, '演示版已达到 100 个附件上限');
-        attachment = { id: randomUUID(), name, data: encoded };
+        items.push({ id: randomUUID(), name, data: encoded });
       }
       const ids = eligible(room, Array.isArray(input.agents) ? input.agents : []);
       const command = bailianCommand(content, ids.length === 1 || (room.kind === 'team' && !ids.length && directory.has(room.lead)));
@@ -535,43 +565,51 @@ createServer(async (req, res) => {
       if (ids.length && runningTaskCount(room) + ids.length > 3) fail(429, '当前会话最多同时运行三个任务');
       const pending = Object.values(state.tasks).filter(task => !task.parent && ['queued', 'running'].includes(task.status)).length;
       if (ids.length && pending + ids.length > 8) fail(429, 'Agent 正忙，请稍后重试');
-      if (upload) {
-        fileBytes = Buffer.from(await upload.arrayBuffer());
-        attachment.imageMime = imageMime(fileBytes);
+      const textParts = [];
+      for (const [index, upload] of uploads.entries()) {
+        const item = items[index];
+        const bytes = Buffer.from(await upload.arrayBuffer());
+        item.imageMime = imageMime(bytes);
         state.files ||= {};
-        state.files[attachment.id] = attachment;
+        state.files[item.id] = item;
         save();
-        try { await storage.put(attachment.id, fileBytes); }
+        try { await storage.put(item.id, bytes); }
         catch (error) {
           console.error('attachment put failed', error.code || error.name);
           fail(502, '附件存储暂不可用，请重试');
         }
-      }
-      if (attachment) {
-        state.files ||= {};
-        state.files[attachment.id] = { ...attachment, room: room.id };
+        if (/\.(txt|md|csv|json|js|css|html|py)$/i.test(item.name)) {
+          textParts.push(item.name + '：\n' + bytes.subarray(0, 36_000).toString('utf8').slice(0, 12_000));
+        }
       }
       if (quoted && !room.messages.includes(quoted)) fail(404, '引用消息已不存在');
+      for (const item of items) {
+        state.files ||= {};
+        state.files[item.id] = { ...item, room: room.id };
+      }
+      const descriptions = items.map(({ id, name }) => ({ id, name }));
       const scope = ['recent', 'selected'].includes(input.scope) ? input.scope : 'message';
       const readable = room.messages.filter(m => m.kind !== 'event' && !m.recalled);
-      const chosen = new Set(Array.isArray(input.messageIds) ? input.messageIds.slice(0, 12) : []);
-      const history = scope === 'recent' ? readable.slice(-12) : scope === 'selected' ? readable.filter(m => chosen.has(m.id)) : [];
+      const chosen = [...new Set(Array.isArray(input.messageIds) ? input.messageIds.slice(0, 12) : [])];
+      const byId = new Map(readable.map(item => [item.id, item]));
+      const history = scope === 'recent' ? readable.slice(-12) : scope === 'selected' ? chosen.map(id => byId.get(id)).filter(Boolean) : [];
       if (quoted && !history.some(item => item.id === quoted.id)) history.push(quoted);
       const message = roomMessage(room, user, 'human', content, {
         agents: ids,
         ...(Array.isArray(input.mentions) ? { mentions: [...new Set(input.mentions.filter(name => room.users.includes(name) && name !== user))] } : {}),
         ...(quoted ? { reply: quoted.id } : {}),
-        ...(attachment ? { attachment: { id: attachment.id, name: attachment.name } } : {}),
+        ...(descriptions.length ? { attachment: descriptions[0], attachments: descriptions } : {}),
         ...(ids.length ? { scope, shared: history.map(item => item.id) } : {})
       });
       let context = ids.length ? messageContext(history, quoted, message) : '';
-      if (attachment && /\.(txt|md|csv|json|js|css|html|py)$/i.test(attachment.name)) {
-        context += '\n本条附带的文本文件 ' + attachment.name + '：\n' + (fileBytes || Buffer.from(attachment.data, 'base64')).subarray(0, 36_000).toString('utf8').slice(0, 12_000);
-      }
-      const attachmentsInScope = [message, ...(quoted ? [quoted] : []), ...history.slice().reverse().filter(item => item !== quoted)];
+      const legacyFile = items.find(item => item.data && /\.(txt|md|csv|json|js|css|html|py)$/i.test(item.name));
+      if (legacyFile) textParts.push(legacyFile.name + '：\n' + Buffer.from(legacyFile.data, 'base64').subarray(0, 36_000).toString('utf8').slice(0, 12_000));
+      if (textParts.length) context += '\n本条附带的文本文件：\n' + textParts.join('\n').slice(0, 12_000);
+      const historyForMedia = scope === 'selected' ? history : history.slice().reverse();
+      const attachmentsInScope = [message, ...(quoted ? [quoted] : []), ...historyForMedia.filter(item => item !== quoted)];
       const files = attachmentsInScope.flatMap(item => {
-        const file = item.attachment && state.files?.[item.attachment.id];
-        if (file && !file.revoked) return [file];
+        const available = attachmentsOf(item).map(attachment => state.files?.[attachment.id]).filter(file => file && !file.revoked);
+        if (available.length) return available;
         const task = item.kind === 'agent' && state.tasks[item.task];
         if (!task || task.room !== room.id || !['bailian-image', 'bailian-edit'].includes(task.capability)) return [];
         const remoteImage = bailianImageUrl(task.result || '');

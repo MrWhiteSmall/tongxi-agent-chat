@@ -1,0 +1,23 @@
+[Unit]
+Description=Tongxi Bailian Media MCP
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+DynamicUser=yes
+EnvironmentFile=/etc/tongxi/media-mcp.env
+Environment=BAILIAN_MCP_ADDR=127.0.0.1:4319
+Environment=GOMEMLIMIT=130MiB
+ExecStart=/opt/tongxi/bin/tongxi-media-mcp
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=/var/lib/tongxi /etc/tongxi
+MemoryHigh=180M
+MemoryMax=240M
+
+[Install]
+WantedBy=multi-user.target

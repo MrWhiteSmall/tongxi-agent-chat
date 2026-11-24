@@ -47,18 +47,24 @@ function setReplyDraft(message = null) {
     : '';
 }
 
-let draftFile = null;
-function setDraftFile(file = null) {
-  if (file && (!file.size || file.size >= 10_000_000)) {
-    toast('请选择小于 10 MB 的非空文件');
+let draftFiles = [];
+const attachmentsOf = message => message.attachments || (message.attachment ? [message.attachment] : []);
+
+function setDraftFiles(files = []) {
+  if (files.length > 4 || files.some(file => !file.size || file.size >= 10_000_000) ||
+      files.reduce((sum, file) => sum + file.size, 0) > 18_000_000) {
+    toast('每条最多 4 个文件，单个小于 10 MB，合计不超过 18 MB');
+    $('fileInput').value = '';
     return;
   }
-  draftFile = file;
+  draftFiles = files;
   $('fileInput').value = '';
-  $('fileName').textContent = file?.name || '';
-  $('fileDraft').hidden = !file;
+  let imageIndex = 0;
+  $('fileName').textContent = files.map(file => (/^image\//.test(file.type) ? '图' + (++imageIndex) + ' ' : '') + file.name).join('、');
+  $('fileDraft').hidden = !files.length;
 }
 let contextIds = [];
+let historySelection = [];
 let refreshing = false;
 let toastTimer;
 let artifact;
@@ -217,7 +223,7 @@ async function openRoom(id) {
   $('scope').value = 'message';
   lastFeed = lastTasks = '';
   $('input').value = '';
-  setDraftFile();
+  setDraftFiles();
   setReplyDraft();
   $('mentionList').hidden = true;
   $('workspace').classList.add('has-room');
@@ -466,7 +472,7 @@ function renderAttachmentCard(message, sourceRoom) {
 
 function loadVisibleThumbnails(sourceRoom) {
   thumbnailObserver?.disconnect();
-  const files = new Map(room.messages.filter(message => message.attachment).map(message => [message.attachment.id, message.attachment]));
+  const files = new Map(room.messages.flatMap(attachmentsOf).map(file => [file.id, file]));
   for (const [id, item] of thumbnails) {
     if (!files.has(id)) {
       if (item.url) URL.revokeObjectURL(item.url);
@@ -522,7 +528,8 @@ function renderRoom() {
         details.append(bubble);
       }
       if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
-      if (message.attachment || message.media) details.append(renderAttachmentCard(message, roomId));
+      for (const file of attachmentsOf(message)) details.append(renderAttachmentCard({ attachment: file }, roomId));
+      if (message.media) details.append(renderAttachmentCard({ media: message.media }, roomId));
       if (message.artifact) {
         const card = el('section', undefined, 'attachment-card');
         const footer = el('div', undefined, 'attachment-meta');
@@ -611,7 +618,7 @@ function renderSelection() {
     selected = selected.filter(item => item !== id);
     renderSelection();
   }, 'chip')));
-  $('scopeLabel').hidden = !selected.length && !typedMentions($('input').value).length && room?.kind !== 'team';
+  $('scopeLabel').hidden = !selected.length && !typedMentions($('input').value).length && room?.kind !== 'team' && !/^\s*\/(?:百炼|bailian)\b|^\s*\/百炼(?:\s|$)/i.test($('input').value);
 }
 
 function mentions(force = false) {
@@ -718,7 +725,7 @@ $('input').onkeydown = event => {
 };
 $('composer').onsubmit = async event => {
   event.preventDefault();
-  if (!room || (!$('input').value.trim() && !draftFile)) return;
+  if (!room || (!$('input').value.trim() && !draftFiles.length)) return;
   const draft = $('input').value;
   const mentionsInDraft = typedMentions(draft);
   const unavailable = mentionsInDraft.find(agent => !agent.id);
@@ -731,23 +738,22 @@ $('composer').onsubmit = async event => {
   submit.disabled = true;
   try {
     const sourceRoom = roomId;
-    const localFile = draftFile;
+    const localFiles = draftFiles;
     const quoted = replyDraft;
     const people = [...mentionedPeople].filter(name => text.includes('@' + name + ' '));
     const message = { text, mentions: people, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id };
     let payload = message;
-    if (localFile) {
-      if (localFile.size >= 10_000_000 || localFile.size === 0) throw new Error('请选择小于 10 MB 的非空文件');
+    if (localFiles.length) {
       payload = new FormData();
       payload.append('message', JSON.stringify(message));
-      payload.append('file', localFile);
+      for (const file of localFiles) payload.append('file', file);
     }
     await api('rooms/' + sourceRoom + '/messages', payload);
     if (roomId !== sourceRoom) return;
     if ($('input').value === draft) $('input').value = '';
     selected = [];
     mentionedPeople.clear();
-    if (draftFile === localFile) setDraftFile();
+    if (draftFiles === localFiles) setDraftFiles();
     if (replyDraft === quoted) setReplyDraft();
     $('mentionList').hidden = true;
     await refresh();
@@ -816,29 +822,56 @@ setInterval(refresh, 1000);
 
 $('scope').onchange = () => {
   if ($('scope').value !== 'selected') return;
-  $('historyList').replaceChildren(...room.messages.filter(message => message.kind !== 'event' && !message.recalled).slice(-30).reverse().map(message => {
+  const candidates = room.messages.filter(message => message.kind !== 'event' && !message.recalled).slice(-30).reverse();
+  historySelection = contextIds.filter(id => candidates.some(message => message.id === id));
+  const indices = new Map();
+  const setIndices = () => {
+    let current = draftFiles.filter(file => /^image\//.test(file.type)).length;
+    const pictureCount = message => attachmentsOf(message || {}).filter(file => file.previewType?.startsWith('image/')).length +
+      Number(message?.media?.kind === 'image');
+    current += pictureCount(replyDraft);
+    for (const index of indices.values()) index.textContent = '';
+    for (const id of historySelection) {
+      if (id === replyDraft?.id) continue;
+      const count = pictureCount(candidates.find(message => message.id === id));
+      if (!count) continue;
+      const next = current + 1;
+      current += count;
+      indices.get(id).textContent = '图' + next + (count > 1 ? '–图' + current : '') + ' ';
+    }
+  };
+  $('historyList').replaceChildren(...candidates.map(message => {
     const label = el('label', undefined, 'person');
+    const copy = el('span');
+    const badge = el('strong');
+    indices.set(message.id, badge);
     const input = el('input');
     input.type = 'checkbox';
     input.value = message.id;
-    input.checked = contextIds.includes(message.id);
-    label.append(input, el('span', nameOf(message.sender) + '：' + message.text.slice(0, 75)));
+    input.checked = historySelection.includes(message.id);
+    input.onchange = () => {
+      historySelection = input.checked ? [...historySelection, message.id] : historySelection.filter(id => id !== message.id);
+      setIndices();
+    };
+    copy.append(badge, document.createTextNode(nameOf(message.sender) + '：' +
+      (message.text || attachmentsOf(message).map(file => file.name).join('、')).slice(0, 75)));
+    label.append(input, copy);
     return label;
   }));
+  setIndices();
   $('historyDialog').showModal();
 };
 $('historyForm').onsubmit = event => {
   event.preventDefault();
-  const ids = [...event.currentTarget.querySelectorAll('input:checked')].map(input => input.value);
-  if (ids.length > 12) return toast('最多选择 12 条');
-  contextIds = ids;
-  if (!ids.length) $('scope').value = 'message';
+  if (historySelection.length > 12) return toast('最多选择 12 条');
+  contextIds = historySelection;
+  if (!contextIds.length) $('scope').value = 'message';
   $('historyDialog').close();
 };
 
-$('fileInput').onchange = () => setDraftFile($('fileInput').files[0]);
+$('fileInput').onchange = () => setDraftFiles([...draftFiles, ...$('fileInput').files]);
 $('clearReply').onclick = () => setReplyDraft();
-$('clearFile').onclick = () => setDraftFile();
+$('clearFile').onclick = () => setDraftFiles();
 $('input').addEventListener('paste', event => {
   const clipboard = event.clipboardData;
   if (!clipboard) return;
@@ -853,8 +886,7 @@ $('input').addEventListener('paste', event => {
   }
   if (!files.length) return;
   event.preventDefault();
-  setDraftFile(files[0]);
-  if (files.length > 1) toast('每条消息支持一份附件，已选择第一份');
+  setDraftFiles([...draftFiles, ...files]);
 });
 $('forwardButton').onclick = () => {
   const teams = app.rooms.filter(item => item.kind === 'team' && item.id !== roomId);

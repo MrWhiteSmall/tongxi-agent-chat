@@ -36,7 +36,7 @@
         <div id="replyDraft" hidden><span id="replyText"></span><button id="clearReply" type="button" class="quiet" aria-label="取消引用">×</button></div>
         <div id="fileDraft" hidden><span id="fileName"></span><button id="clearFile" type="button" class="quiet" aria-label="移除附件">×</button></div>
         <textarea id="input" placeholder="输入消息，按 @ 邀请 Agent" rows="2" maxlength="6000" aria-label="消息"></textarea>
-        <div class="compose-actions"><label id="attachLabel" class="quiet" title="添加附件">＋附件<input id="fileInput" type="file" hidden></label><button id="mentionButton" type="button" class="quiet" aria-label="选择 Agent">@</button><label id="scopeLabel" hidden>共享给 Agent <select id="scope"><option value="message">仅本条</option><option value="recent">最近 12 条</option><option value="selected">选择历史</option></select></label><button class="primary">发送</button></div>
+        <div class="compose-actions"><label id="attachLabel" class="quiet" title="添加附件">＋附件<input id="fileInput" type="file" multiple hidden></label><button id="mentionButton" type="button" class="quiet" aria-label="选择 Agent">@</button><label id="scopeLabel" hidden>共享给 Agent <select id="scope"><option value="message">仅本条</option><option value="recent">最近 12 条</option><option value="selected">选择历史</option></select></label><button class="primary">发送</button></div>
       </form>
     </div>
   </section>
