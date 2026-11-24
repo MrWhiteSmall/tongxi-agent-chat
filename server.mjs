@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { attachments, imageMime, maxFileBytes } from './adapters/attachments.mjs';
-import { bailianCommand, bailianEnabled, bailianSourceList, bailianUsesImages, runBailian, searchBailian } from './adapters/bailian.mjs';
+import { bailianCommand, bailianEnabled, bailianImageUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acceptsImages, directory, runAgent } from './adapters/index.mjs';
 
@@ -53,13 +53,13 @@ function eligible(room, ids) {
   return [...new Set(ids)].filter(id => directory.has(id) && (room.kind !== 'team' || room.agents.includes(id)));
 }
 
-function taskFor(room, agent, message, context, files, command) {
+function taskFor(room, agent, message, context, files, command, quoted) {
   const task = { id: randomUUID(), room: room.id, agent, source: message.id, status: 'queued', parent: null, created: Date.now(), ...(command ? { capability: 'bailian-' + command.kind } : {}) };
   state.tasks[task.id] = task;
   if (room.kind !== 'team' && !room.agents.includes(agent)) {
     roomMessage(room, agent, 'event', '临时加入', { task: task.id });
   }
-  queueMicrotask(() => execute(task, context, files, undefined, command));
+  queueMicrotask(() => execute(task, context, files, undefined, command, quoted));
   return task;
 }
 
@@ -104,6 +104,10 @@ async function imageInputs(files, signal, readBytes) {
   let remaining = maxFileBytes;
   for (const file of files) {
     if (file.revoked) continue;
+    if (file.remoteImage) {
+      if (result.length < 2) result.push({ name: file.name, ...(readBytes ? { url: file.remoteImage } : {}) });
+      continue;
+    }
     const imageName = /\.(png|jpe?g|gif|webp)$/i.test(file.name);
     if (!file.imageMime && !imageName) continue;
     if (!readBytes) { result.push({ name: file.name }); continue; }
@@ -132,7 +136,7 @@ async function imageInputs(files, signal, readBytes) {
   return result;
 }
 
-async function execute(task, context, files, existingImages, command) {
+async function execute(task, context, files, existingImages, command, quoted) {
   if (task.status !== 'queued') return;
   const room = state.rooms[task.room];
   const agent = directory.get(task.agent);
@@ -147,32 +151,20 @@ async function execute(task, context, files, existingImages, command) {
     const system = '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules;
     const status = progress => { task.progress = progress; save(); };
     let action = command;
-    if (action?.automatic) {
-      const allowed = action.kind === 'intent' ? ['image', 'edit', 'video', 'search'] : [action.kind];
-      const choice = await runAgent(agent, '只返回 JSON {"tool":"工具名或 none","query":"执行所需的提示词"}。可用工具：' + allowed.join('、') + '。' +
-        'image 生图，包括用户要求生成没有指定格式的实体或场景，例如“生成一只杜宾犬”；edit 编辑用户的原图；video 生成视频；search 联网查证。' +
-        '用户明确要代码、网页、游戏、文档、文字或讨论如何做时返回 none。用户要看图片时不得把需求改写成生成代码。' +
-        '保留用户约束；搜索词不得携带与查询无关的私人信息。',
-      action.prompt, controller.signal);
-      const original = action;
-      let resolved = false;
-      try {
-        const parsed = JSON.parse(choice.trim().replace(/^```(?:json)?\s*|\s*```$/gi, ''));
-        if (parsed.tool === 'none') { action = null; resolved = true; }
-        else if (allowed.includes(parsed.tool) && typeof parsed.query === 'string' && parsed.query.trim()) {
-          action = { ...action, kind: parsed.tool, prompt: parsed.query.trim().slice(0, 6000) };
-          resolved = true;
-        }
-      } catch {}
-      if (original.kind === 'intent' && !resolved) throw new Error('无法确认要用的工具，请写明生图、视频、改图或联网搜索');
-      if (action?.kind === 'edit' && original.kind === 'intent') images = await imageInputs(files, controller.signal, true);
+    if (action?.kind === 'intent') {
+      status('正在分析是否需要调用工具。');
+      action = await chooseBailianAction(command, images, quoted, controller.signal);
+      if (!action && command.manual) throw new Error('请指定百炼操作，例如 /百炼 生图、/百炼 改图、/百炼 视频或 /百炼 搜索');
+      if (bailianUsesImages(action) || (!action && acceptsImages(agent))) {
+        images = await imageInputs(files, controller.signal, true);
+      }
       if (action?.kind === 'video' && Object.values(state.tasks).some(item => item.id !== task.id &&
           item.capability === 'bailian-video' && ['queued', 'running'].includes(item.status))) {
         throw new Error('已有百炼视频正在生成，请稍后再试');
       }
-      if (!action && original.kind === 'intent' && acceptsImages(agent)) images = await imageInputs(files, controller.signal, true);
       if (action) task.capability = 'bailian-' + action.kind;
       else delete task.capability;
+      delete task.progress;
       save();
     }
     let material = context;
@@ -512,7 +504,7 @@ createServer(async (req, res) => {
         attachment = { id: randomUUID(), name, data: encoded };
       }
       const ids = eligible(room, Array.isArray(input.agents) ? input.agents : []);
-      const command = bailianCommand(content, ids.length > 0 || room.kind === 'team');
+      const command = bailianCommand(content, ids.length === 1 || (room.kind === 'team' && !ids.length && directory.has(room.lead)));
       if (command && !bailianEnabled) fail(503, '百炼 API Key 未配置');
       if (room.kind === 'team' && !ids.length && room.lead && directory.has(room.lead)) ids.push(room.lead);
       if (command && !ids.length && directory.has('qwen')) ids.push('qwen');
@@ -554,9 +546,17 @@ createServer(async (req, res) => {
       if (attachment && /\.(txt|md|csv|json|js|css|html|py)$/i.test(attachment.name)) {
         context += '\n本条附带的文本文件 ' + attachment.name + '：\n' + (fileBytes || Buffer.from(attachment.data, 'base64')).subarray(0, 36_000).toString('utf8').slice(0, 12_000);
       }
-      const files = [message, ...history.slice().reverse()].map(item => item.attachment && state.files?.[item.attachment.id]).filter(Boolean);
+      const attachmentsInScope = [message, ...(quoted ? [quoted] : []), ...history.slice().reverse().filter(item => item !== quoted)];
+      const files = attachmentsInScope.flatMap(item => {
+        const file = item.attachment && state.files?.[item.attachment.id];
+        if (file && !file.revoked) return [file];
+        const task = item.kind === 'agent' && state.tasks[item.task];
+        if (!task || task.room !== room.id || !['bailian-image', 'bailian-edit'].includes(task.capability)) return [];
+        const remoteImage = bailianImageUrl(task.result || '');
+        return remoteImage ? [{ name: '引用的百炼图片', remoteImage }] : [];
+      });
       if (files.length) context += '\n用户允许共享的附件名称：' + files.map(file => file.name).join('、') + '。只分析实际收到的文件内容。';
-      for (const id of ids) taskFor(room, id, message, context, files, command);
+      for (const id of ids) taskFor(room, id, message, context, files, command, quoted);
       save();
       return json({ id: message.id }, 201);
     }
