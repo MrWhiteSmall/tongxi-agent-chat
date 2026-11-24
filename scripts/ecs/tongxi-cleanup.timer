@@ -1,0 +1,10 @@
+[Unit]
+Description=Clear Tongxi internal-test data daily at 04:00 Shanghai time
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Shanghai
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

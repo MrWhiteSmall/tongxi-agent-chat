@@ -1,0 +1,40 @@
+# 同席 · Agent Chat
+
+本地聊天原型。真人私聊或群聊可以临时邀请 Agent，在自己的独立 AI 团队里可以把任务交给一组 Agent。手机浏览器和 macOS 桌面应用使用同一个界面。
+
+## 本机开箱
+
+1. 解压 `dist/Tongxi-mac-arm64.zip`，打开 `Tongxi.app`。适用于 Apple Silicon Mac。签名是本地 ad-hoc 签名，安装包未公证。
+2. 本机演示账号是 `A` 到 `E`，无需登录码。点击「新建会话」建立私聊、群聊或独立 AI 团队。也可在同一台机器的两个浏览器标签页打开桌面的本地服务地址，分别登录 A、B。
+3. 桌面程序读取本机交互式 zsh 的环境变量。存在 `DEEPSEEK_API_KEY` 时，默认目录加入 DeepSeek、制作助手、审校助手。如果没有配置可用的模型 API，仍可用「离线示例」体验预览。macOS 应用数据保存在系统「应用程序支持」目录的 Tongxi 文件夹。
+
+源码启动浏览器版需要 Node.js 24+，本机存储模式无需安装 OSS 依赖，服务器存储模式先运行 `npm ci --omit=dev`。
+
+```sh
+zsh -ic 'node server.mjs'
+```
+
+在浏览器打开 `http://127.0.0.1:4317`。同一时刻只运行一个进程写同一份 SQLite 数据。用不同的浏览器窗口或标签页分别登录 A、B。双人聊天、群聊和私有团队都支持文本以及严格小于 10 MB 的附件（10 MB = 10,000,000 字节）。服务器附件写入私有 OSS，桌面或本地模式写入数据目录。。
+
+## Agent
+
+| Agent | 后端 | 启用条件 |
+| --- | --- | --- |
+| DeepSeek、制作助手、审校助手 | DeepSeek API，默认 `deepseek-flash` | `DEEPSEEK_API_KEY`。制作和审校在仅配置 Qwen 时可用 Qwen。 |
+| Qwen | 百炼 OpenAI 兼容接口，默认 `qwen4-max` | `DASHSCOPE_API_KEY` 或 `QWEN_API_KEY`，按地域或工作空间配置 `QWEN_BASE_URL`，可用 `QWEN_MODEL` 改模型。 |
+| Codex | 本机已登录的 Codex CLI | 桌面自动探测，需要本机登录。浏览器版用 `ENABLE_CODEX=1`。 |
+| Claude | 本机 Claude Code，沿用本机可用的授权 | 桌面探测，浏览器版用 `ENABLE_CLAUDE=1`。 |
+| PiAgent | 本机 Pi，使用配置的推理后端 | 有 DeepSeek API Key 时桌面默认选 `deepseek/deepseek-flash`，也可设 `PI_MODEL`。 |
+| DeepSeek Harness | 本机已配置的 `dsh` headless，或自建 HTTP 服务 | 桌面探测。浏览器版用 `ENABLE_DSH=1` 或 `DEEPSEEKHARNESS_URL`。 |
+| Mastra、OhMyGame、CrewAI | 自建 HTTP Agent 服务 | 配置 `MASTRA_URL`、`OHMYGAME_URL`、`CREWAI_URL`。 |
+
+HTTP 适配器对配置的完整 URL 发 `POST`，请求为 `{"system":"角色指令","input":"授权的任务上下文"}`，响应为 `{"text":"回答或含 html 代码块的产物"}`。端点私有时使用同前缀的 `_TOKEN` 环境变量。运行时可以在内部启动自己的子 Agent，当前适配器返回最终文本。聊天里可查看的是平台分派的子任务进度。桌面版的 CLI 适配器使用临时目录、限制工具或选择只读权限。当前原型通过返回的单文件 HTML 交付小游戏和工具，暂未提供任意多文件工程的写权限、安装依赖或发布。
+
+敏感凭据由服务进程读取，浏览器和分发包无需携带密钥。私聊或群聊邀请 Agent 默认只共享发出的消息，可改选「最近 12 条」或手选历史。把会话文字转发到私有 AI 团队后，再用团队消息发起任务。产物预览使用独立来源的沙箱，用户可下载 HTML 或明确分享给目标会话。
+
+- [设计计划](docs/DESIGN.md)
+- [五人内部部署与成本](docs/DEPLOYMENT.md)
+
+`npm test` 验证多人会话、Agent 加入和退出、子任务、隐私、文件、分享、取消与恢复。`npm ci` 后运行 `npm run package:mac` 构建当前架构的 macOS 包。
+
+复制截图、图片或浏览器可读取的文件后，在输入框粘贴即可加入待发送附件，点击「发送」后上传。每条消息可附一份文件。已上传的图片可随当前消息交给 DeepSeek Flash，也可通过「选择历史」明确授权分享已有图片。单次最多传两张、总大小小于或等于 10 MB。

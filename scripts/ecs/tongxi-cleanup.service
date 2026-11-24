@@ -1,0 +1,20 @@
+[Unit]
+Description=Clear Tongxi internal-test data
+Requires=tongxi.service
+After=tongxi.service
+StartLimitIntervalSec=30min
+StartLimitBurst=10
+
+[Service]
+Type=oneshot
+User=tongxi
+Group=tongxi
+EnvironmentFile=/etc/tongxi/app.env
+ExecStart=/opt/tongxi/node/bin/node /opt/tongxi/app/scripts/ecs/run-cleanup.mjs
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=16min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict

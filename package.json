@@ -1,0 +1,1 @@
+{"name":"agent-chat","version":"0.1.0","private":true,"type":"module","engines":{"node":">=24"},"scripts":{"start":"node server.mjs","test":"node --test","desktop":"electron .","package:mac":"node scripts/package.mjs"},"devDependencies":{"@electron/packager":"^20.3.0","electron":"^45.4.1"},"main":"desktop.cjs","dependencies":{"ali-oss":"^6.23.0"}}

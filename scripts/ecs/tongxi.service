@@ -1,0 +1,25 @@
+[Unit]
+Description=Tongxi Agent Chat
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=tongxi
+Group=tongxi
+WorkingDirectory=/opt/tongxi/app
+EnvironmentFile=/etc/tongxi/app.env
+ExecStart=/opt/tongxi/node/bin/node /opt/tongxi/app/server.mjs
+Restart=on-failure
+RestartSec=3
+StateDirectory=tongxi
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+MemoryHigh=300M
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target

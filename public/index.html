@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f1f5f1"><title>同席 · Agent Chat</title><link rel="stylesheet" href="style.css"><script type="module" src="app.js"></script></head>
+<body>
+<main id="login" hidden>
+  <form id="loginForm" class="login-card">
+    <div class="brand"><span>同</span><strong>同席</strong></div>
+    <h1>登录聊天</h1><label>账号<input id="loginName" required maxlength="32" autocomplete="username"></label>
+    <label id="codeLabel">登录码<input id="loginCode" type="password" autocomplete="current-password"></label>
+    <p id="localHint" class="muted" hidden>本机演示可使用 A、B、C、D、E。用不同浏览器窗口的独立会话体验双人聊天。</p>
+    <button class="primary">登录</button><p id="loginError" role="alert"></p>
+  </form>
+</main>
+<main id="workspace" hidden>
+  <aside id="sidebar">
+    <div class="sidebar-heading"><div class="brand"><span>同</span><strong id="tabTitle">同席</strong></div>
+    <button id="newRoom" class="primary" aria-label="新建会话"><span aria-hidden="true">＋</span><span class="desktop-label"> 新建会话</span></button></div>
+    <div id="inbox" class="tab-panel"><label class="search" aria-label="搜索会话"><input id="roomSearch" type="search" placeholder="搜索会话"></label><nav id="rooms" aria-label="会话"></nav></div>
+    <div id="contacts" class="tab-panel" hidden><div id="contactList"></div></div>
+    <div id="profile" class="tab-panel" hidden><div class="profile-card"><span id="profileAvatar" class="avatar"></span><div><strong id="profileName"></strong><p class="muted">当前账号</p></div></div><button id="mobileLogout" class="quiet">退出登录</button></div>
+    <nav id="tabs" aria-label="主导航">
+      <button data-tab="inbox" class="tab active"><i class="tab-icon icon-chat" aria-hidden="true"></i>消息</button>
+      <button data-tab="contacts" class="tab"><i class="tab-icon icon-contacts" aria-hidden="true"></i>联系人</button>
+      <button data-tab="profile" class="tab"><i class="tab-icon icon-profile" aria-hidden="true"></i>我</button>
+    </nav>
+    <footer><span id="identity"></span><button id="logout" class="quiet">退出</button></footer>
+  </aside>
+  <section id="conversation">
+    <div id="empty"><h1>开始一场对话</h1><p>与朋友聊天，或创建自己的 AI 团队。</p></div>
+    <div id="chat" hidden>
+      <header><button id="back" class="quiet" aria-label="返回会话">‹</button><div><h1 id="roomTitle"></h1><p id="roomSub"></p></div><button id="forwardButton" class="quiet">转发给团队</button><button id="taskButton" type="button" class="quiet" aria-haspopup="dialog">任务<span id="taskCount" hidden></span></button><button id="memberButton" class="quiet">成员</button></header>
+      <div id="feed" aria-live="polite"></div>
+      <form id="composer">
+        <div id="mentionList" hidden></div>
+        <div id="selectedAgents"></div>
+        <div id="fileDraft" hidden><span id="fileName"></span><button id="clearFile" type="button" class="quiet" aria-label="移除附件">×</button></div>
+        <textarea id="input" placeholder="输入消息，按 @ 邀请 Agent" rows="2" maxlength="6000" aria-label="消息"></textarea>
+        <div class="compose-actions"><label id="attachLabel" class="quiet" title="添加附件">＋附件<input id="fileInput" type="file" hidden></label><button id="mentionButton" type="button" class="quiet" aria-label="选择 Agent">@</button><label id="scopeLabel" hidden>共享给 Agent <select id="scope"><option value="message">仅本条</option><option value="recent">最近 12 条</option><option value="selected">选择历史</option></select></label><button class="primary">发送</button></div>
+      </form>
+    </div>
+  </section>
+</main>
+<dialog id="createDialog"><form id="createForm">
+  <h2>新建会话</h2>
+  <label>类型<select id="roomKind"><option value="dm">私聊</option><option value="group">群聊</option><option value="team">独立 AI 团队</option></select></label>
+  <label id="roomNameLabel">群名称<input id="roomName" maxlength="48"></label>
+  <fieldset id="people"><legend>选择成员</legend><div id="peopleList"></div></fieldset>
+  <p id="teamHint" class="muted" hidden>默认加入所有可用 Agent，可在成员面板删减。</p>
+  <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button class="primary">创建</button></div>
+</form></dialog>
+<dialog id="tasksDialog" aria-labelledby="tasksTitle"><h2 id="tasksTitle">当前会话任务</h2><div id="taskPanel"></div><div class="dialog-actions"><button type="button" class="quiet" data-close>关闭</button></div></dialog>
+<dialog id="membersDialog"><h2>会话成员</h2><div id="memberList"></div><div class="dialog-actions"><button class="quiet" data-close>关闭</button></div></dialog>
+<dialog id="previewDialog"><h2>产物预览</h2><iframe id="preview" title="产物预览" sandbox="allow-scripts"></iframe><div class="dialog-actions"><select id="shareDestination" aria-label="分享目标"></select><button id="share" class="quiet">分享</button><button id="download" class="primary">下载 HTML</button><button class="quiet" data-close>关闭</button></div></dialog>
+<dialog id="historyDialog"><form id="historyForm"><h2>选择要共享的历史</h2><div id="historyList"></div><div class="dialog-actions"><button class="primary">确定</button></div></form></dialog>
+<dialog id="forwardDialog"><form id="forwardForm"><h2>转发到独立 AI 团队</h2><label>目标团队<select id="forwardTarget" required></select></label><div id="forwardList"></div><div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button class="primary">转发</button></div></form></dialog>
+<div id="toast" role="status" hidden></div>
+</body>
+</html>

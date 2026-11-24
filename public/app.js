@@ -1,0 +1,556 @@
+const $ = id => document.getElementById(id);
+const el = (tag, text, className) => {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+};
+function button(text, click, className = 'quiet') {
+  const node = el('button', text, className);
+  node.type = 'button';
+  node.addEventListener('click', click);
+  return node;
+}
+
+let token = sessionStorage.getItem('token');
+let app;
+let room;
+let roomId;
+let selected = [];
+let draftFile = null;
+function setDraftFile(file = null) {
+  if (file && (!file.size || file.size >= 10_000_000)) {
+    toast('请选择小于 10 MB 的非空文件');
+    return;
+  }
+  draftFile = file;
+  $('fileInput').value = '';
+  $('fileName').textContent = file?.name || '';
+  $('fileDraft').hidden = !file;
+}
+let contextIds = [];
+let refreshing = false;
+let toastTimer;
+let artifact;
+let artifactSource;
+let lastFeed = '';
+let lastTasks = '';
+let lastRooms = '';
+const seen = new Map();
+const mobile = matchMedia('(max-width:640px)');
+const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
+const taskStatus = { queued: '排队中', running: '执行中', done: '已完成', cancelled: '已停止', failed: '失败' };
+const mentionNames = [
+  { ids: ['deepseek', 'deepseekharness'], name: 'DeepSeek', alias: 'dsh' },
+  { ids: ['claude'], name: 'ClaudeCode', alias: 'cc' },
+  { ids: ['codex'], name: 'Codex', alias: 'codex' },
+  { ids: ['ohmygame'], name: 'ohMygame', alias: 'omg' },
+  { ids: ['piagent'], name: 'PiAgent', alias: 'pi' }
+];
+const nameOf = id => mentionNames.find(agent => agent.ids.includes(id))?.name || app?.catalog.find(agent => agent.id === id)?.name || id;
+const titleOf = item => item.kind === 'dm' ? item.users.find(user => user !== app.user) : item.name;
+const isActive = task => ['queued', 'running'].includes(task.status);
+
+function toast(message) {
+  $('toast').textContent = message;
+  $('toast').hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4500);
+}
+
+async function api(path, data) {
+  const multipart = data instanceof FormData;
+  const response = await fetch('api/' + path, {
+    method: data === undefined ? 'GET' : 'POST',
+    headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined || multipart ? {} : { 'Content-Type': 'application/json' }) },
+    ...(data === undefined ? {} : { body: multipart ? data : JSON.stringify(data) })
+  });
+  const value = await response.json();
+  if (!response.ok) throw Object.assign(new Error(value.error), { status: response.status });
+  return value;
+}
+
+function showLogin() {
+  token = null;
+  sessionStorage.removeItem('token');
+  app = room = roomId = null;
+  lastRooms = lastFeed = lastTasks = '';
+  $('login').hidden = false;
+  $('workspace').hidden = true;
+  if ($('tasksDialog').open) $('tasksDialog').close();
+}
+
+async function refresh() {
+  if (!token || refreshing) return;
+  refreshing = true;
+  const currentToken = token;
+  const currentRoom = roomId;
+  try {
+    const model = await api('state');
+    if (token !== currentToken) return;
+    app = model;
+    $('login').hidden = true;
+    $('workspace').hidden = false;
+    $('identity').textContent = app.user;
+    const snapshot = JSON.stringify(app.rooms);
+    if (snapshot !== lastRooms) {
+      lastRooms = snapshot;
+      renderRoomList();
+    }
+    $('profileAvatar').textContent = app.user.slice(0, 1);
+    $('profileName').textContent = app.user;
+    if (currentRoom) {
+      const updated = await api('rooms/' + currentRoom);
+      if (token === currentToken && currentRoom === roomId) {
+        room = updated;
+        renderRoom();
+      }
+    }
+  } catch (error) {
+    if (error.status === 401 && currentToken === token) showLogin();
+    else toast(error.message);
+  } finally { refreshing = false; }
+}
+
+function renderRoomList() {
+  if (!app) return;
+  const search = $('roomSearch').value.trim().toLowerCase();
+  const sorted = app.rooms.filter(item => titleOf(item).toLowerCase().includes(search))
+    .sort((a, b) => (b.lastAt || b.created || 0) - (a.lastAt || a.created || 0));
+  $('rooms').replaceChildren(...sorted.map(item => {
+    const unread = item.lastAt > (seen.get(item.id) || 0) && item.lastSender !== app.user && item.id !== roomId;
+    const link = button('', () => openRoom(item.id), 'room-link' + (item.id === roomId ? ' active' : ''));
+    link.dataset.room = item.id;
+    const avatar = el('span', item.kind === 'team' ? 'AI' : titleOf(item).slice(0, 1), 'avatar room-avatar ' + item.kind);
+    avatar.setAttribute('aria-hidden', 'true');
+    const text = el('span', undefined, 'room-copy');
+    text.append(el('strong', titleOf(item)), el('small', item.last || (item.kind === 'team' ? '独立 AI 团队' : '暂无消息')));
+    const meta = el('span', undefined, 'room-meta');
+    if (item.lastAt) meta.append(el('time', clock.format(item.lastAt)));
+    if (unread) meta.append(el('i', undefined, 'unread'));
+    link.setAttribute('aria-label', titleOf(item));
+    link.append(avatar, text, meta);
+    return link;
+  }));
+  if (!sorted.length) $('rooms').append(el('p', search ? '没有找到会话' : '暂无会话', 'list-empty'));
+}
+
+function setTab(tab) {
+  for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.id !== tab;
+  for (const item of document.querySelectorAll('[data-tab]')) {
+    const active = item.dataset.tab === tab;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-current', active ? 'page' : 'false');
+  }
+  $('tabTitle').textContent = { inbox: '同席', contacts: '联系人', profile: '我' }[tab];
+  if (tab !== 'contacts' || !app) return;
+  const people = app.people.map(name => {
+    const row = button('', async () => {
+      try {
+        const { id } = await api('rooms', { kind: 'dm', users: [name] });
+        setTab('inbox');
+        await openRoom(id);
+      } catch (error) { toast(error.message); }
+    }, 'contact-row');
+    row.append(el('span', name.slice(0, 1), 'avatar'), el('strong', name));
+    return row;
+  });
+  const agents = app.catalog.map(agent => {
+    const row = el('div', undefined, 'contact-row');
+    const copy = el('div');
+    copy.append(el('strong', agent.name), el('small', agent.role));
+    row.append(el('span', 'AI', 'avatar'), copy);
+    return row;
+  });
+  $('contactList').replaceChildren(el('h2', '联系人'), ...people, el('h2', '可用 Agent'), ...agents);
+}
+
+async function openRoom(id) {
+  roomId = id;
+  const item = app.rooms.find(item => item.id === id);
+  seen.set(id, item?.lastAt || Date.now());
+  renderRoomList();
+  $('chat').hidden = true;
+  $('empty').hidden = false;
+  room = null;
+  selected = [];
+  contextIds = [];
+  $('scope').value = 'message';
+  lastFeed = lastTasks = '';
+  $('input').value = '';
+  setDraftFile();
+  $('mentionList').hidden = true;
+  $('workspace').classList.add('has-room');
+  await refresh();
+}
+
+function renderRoom() {
+  $('empty').hidden = true;
+  $('chat').hidden = false;
+  seen.set(roomId, room.messages.at(-1)?.at || Date.now());
+  $('roomTitle').textContent = titleOf(room);
+  $('roomSub').textContent = room.kind === 'team' ? '独立 AI 团队 · ' + room.agents.length + ' 位 Agent' : room.kind === 'dm' ? '私聊' : room.users.length + ' 位成员';
+  const snapshot = JSON.stringify(room.messages);
+  if (snapshot !== lastFeed) {
+    const atBottom = !lastFeed || $('feed').scrollHeight - $('feed').scrollTop - $('feed').clientHeight < 100;
+    lastFeed = snapshot;
+    $('feed').replaceChildren(...room.messages.flatMap((message, index) => {
+      const preceding = room.messages[index - 1];
+      const timestamp = !preceding || message.at - preceding.at > 5 * 60_000 ? [el('div', clock.format(message.at), 'timestamp')] : [];
+      if (message.kind === 'event') return [...timestamp, el('div', nameOf(message.sender) + ' ' + message.text, 'system-message')];
+      const mine = message.kind === 'human' && message.sender === app.user;
+      const row = el('article', undefined, 'message' + (mine ? ' mine' : ''));
+      row.append(el('span', message.kind === 'agent' ? 'AI' : message.sender.slice(0, 1), 'avatar'));
+      const details = el('div', undefined, 'message-content');
+      details.append(el('div', (message.kind === 'human' ? message.sender : nameOf(message.sender)) + (message.kind === 'agent' ? ' · Agent' : ''), 'sender'));
+      const source = room.messages.find(item => item.id === message.reply);
+      if (source) details.append(el('blockquote', source.text.slice(0, 100)));
+      details.append(el('div', message.text, 'bubble'));
+      if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
+      if (message.attachment) details.append(button('下载 ' + message.attachment.name, async () => {
+        try {
+          const response = await fetch('api/rooms/' + roomId + '/attachment?download=1&id=' + encodeURIComponent(message.attachment.id), {
+            headers: { Authorization: 'Bearer ' + token }
+          });
+          if (!response.ok) throw new Error('附件下载失败');
+          downloadFile(await response.blob(), message.attachment.name);
+        } catch (error) { toast(error.message); }
+      }));
+      if (message.artifact) details.append(button('打开预览', () => showArtifact(message.task)));
+      row.append(details);
+      return [...timestamp, row];
+    }));
+    if (atBottom) $('feed').scrollTop = $('feed').scrollHeight;
+  }
+  const activeCount = room.tasks.filter(task => !task.parent && isActive(task)).length;
+  $('taskCount').textContent = activeCount;
+  $('taskCount').hidden = !activeCount;
+  if ($('tasksDialog').open) renderTasks();
+  renderSelection();
+}
+
+function renderTasks() {
+  if (!room) return;
+  const snapshot = JSON.stringify(room.tasks);
+  if (snapshot === lastTasks) return;
+  lastTasks = snapshot;
+  const expanded = new Set([...$('taskPanel').querySelectorAll('details[open]')].map(item => item.dataset.id));
+  const roots = room.tasks.filter(task => !task.parent);
+  const items = [...roots.filter(isActive).reverse(), ...roots.filter(task => !isActive(task)).reverse()];
+  $('taskPanel').replaceChildren(...items.map(task => {
+    const item = el('details', undefined, 'task');
+    item.dataset.id = task.id;
+    item.open = expanded.has(task.id);
+    item.append(el('summary', nameOf(task.agent) + ' · ' + taskStatus[task.status]));
+    if (task.error) item.append(el('p', task.error, 'muted'));
+    for (const child of room.tasks.filter(child => child.parent === task.id)) {
+      item.append(el('p', nameOf(child.agent) + ' · ' + taskStatus[child.status] + (child.preview ? '：' + child.preview : '')));
+    }
+    if (isActive(task) && (room.owner === app.user || room.messages.find(message => message.id === task.source)?.sender === app.user)) {
+      item.append(button('停止任务', () => change('cancel', { task: task.id })));
+    }
+    return item;
+  }));
+  if (!items.length) $('taskPanel').append(el('p', '当前会话暂无任务。', 'muted'));
+}
+
+function mentionChoices() {
+  const choices = mentionNames.map(choice => {
+    const id = choice.ids.find(candidate => app.catalog.some(agent => agent.id === candidate) &&
+      (room.kind !== 'team' || room.agents.includes(candidate)));
+    const connected = choice.ids.some(candidate => app.catalog.some(agent => agent.id === candidate));
+    return { ...choice, id, status: connected ? '未加入' : '未接入' };
+  });
+  const offline = app.catalog.find(agent => agent.id === 'offline');
+  if (offline && (room.kind !== 'team' || room.agents.includes(offline.id))) {
+    choices.push({ id: offline.id, name: offline.name, alias: '' });
+  }
+  return choices;
+}
+
+function typedMentions(text) {
+  if (!room) return [];
+  const lower = text.toLowerCase();
+  return mentionChoices().filter(agent => [agent.name, agent.alias].filter(Boolean).some(value => {
+    const needle = '@' + value.toLowerCase();
+    let index = lower.indexOf(needle);
+    while (index >= 0) {
+      const before = index ? lower[index - 1] : '';
+      const after = lower[index + needle.length] || '';
+      if ((!before || !/[\w@]/.test(before)) && (!after || !/[\w-]/.test(after))) return true;
+      index = lower.indexOf(needle, index + needle.length);
+    }
+    return false;
+  }));
+}
+
+function renderSelection() {
+  $('selectedAgents').replaceChildren(...selected.map(id => button('@' + nameOf(id) + ' ×', () => {
+    selected = selected.filter(item => item !== id);
+    renderSelection();
+  }, 'chip')));
+  $('scopeLabel').hidden = !selected.length && !typedMentions($('input').value).length && room?.kind !== 'team';
+}
+
+function mentions(force = false) {
+  const input = $('input');
+  const before = input.value.slice(0, input.selectionStart);
+  const match = before.match(/(?:^|\s)@([^@\n]*)$/);
+  const query = match?.[1].trim().toLowerCase() || '';
+  if (!room || (!force && (!match || (typedMentions(before).length && /[\s，。？！、：:!?]/.test(query))))) {
+    $('mentionList').hidden = true;
+    return;
+  }
+  const candidates = mentionChoices().filter(agent => !query || [agent.name, agent.alias].some(value => value.toLowerCase().startsWith(query)));
+  $('mentionList').replaceChildren(...candidates.map(agent => {
+    const option = button('', () => {
+      if (!selected.includes(agent.id)) selected.push(agent.id);
+      if (match) input.setRangeText('', before.lastIndexOf('@'), input.selectionStart, 'end');
+      input.focus();
+      $('mentionList').hidden = true;
+      renderSelection();
+    }, 'mention-option');
+    option.disabled = !agent.id;
+    option.append(el('span', agent.name));
+    if (agent.alias && agent.alias !== agent.name.toLowerCase()) option.append(el('small', '@' + agent.alias));
+    if (!agent.id) option.append(el('small', agent.status));
+    return option;
+  }));
+  if (!candidates.length) $('mentionList').append(el('p', '没有匹配的 Agent', 'muted'));
+  $('mentionList').hidden = false;
+}
+
+async function change(action, data) {
+  try {
+    await api('rooms/' + roomId + '/' + action, data);
+    await refresh();
+    if ($('membersDialog').open) renderMembers();
+  } catch (error) { toast(error.message); }
+}
+
+function renderMembers() {
+  const list = $('memberList');
+  list.replaceChildren(...room.users.map(user => el('p', user + (user === app.user ? ' · 你' : ''))));
+  for (const agent of app.catalog) {
+    const line = el('div', undefined, 'member-line');
+    const assigned = room.agents.includes(agent.id);
+    const temporary = room.tasks.some(task => !task.parent && task.agent === agent.id && isActive(task));
+    line.append(el('span', agent.name + (room.lead === agent.id ? ' · 负责人' : assigned ? ' · 已加入' : temporary ? ' · 临时参与' : '')));
+    if (room.kind !== 'group' || room.owner === app.user) {
+      line.append(button(assigned || temporary ? '移除' : '加入', () => change('members', { agent: agent.id, mode: assigned || temporary ? 'remove' : 'add' })));
+      if (assigned && room.kind === 'team' && room.lead !== agent.id) line.append(button('设为负责人', () => change('members', { agent: agent.id, mode: 'lead' })));
+    }
+    list.append(line);
+  }
+}
+
+async function showArtifact(id) {
+  try {
+    const result = await api('rooms/' + roomId + '/artifact?task=' + encodeURIComponent(id));
+    artifact = result.html;
+    artifactSource = { room: roomId, task: id };
+    $('shareDestination').replaceChildren(...app.rooms.filter(item => item.id !== roomId).map(item => {
+      const option = el('option', titleOf(item));
+      option.value = item.id;
+      return option;
+    }));
+    $('share').disabled = !$('shareDestination').options.length;
+    $('preview').src = new URL(result.url.slice(1), document.baseURI);
+    $('previewDialog').showModal();
+  } catch (error) { toast(error.message); }
+}
+
+$('share').onclick = async () => {
+  try {
+    await api('rooms/' + artifactSource.room + '/share', { task: artifactSource.task, target: $('shareDestination').value });
+    toast('已分享');
+  } catch (error) { toast(error.message); }
+};
+function downloadFile(blob, name) {
+  const link = el('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 3000);
+}
+$('download').onclick = () => downloadFile(new Blob([artifact], { type: 'text/html' }), 'agent-artifact.html');
+$('previewDialog').addEventListener('close', () => { $('preview').removeAttribute('src'); });
+for (const close of document.querySelectorAll('[data-close]')) close.onclick = () => close.closest('dialog').close();
+$('taskButton').onclick = () => { renderTasks(); $('tasksDialog').showModal(); };
+$('memberButton').onclick = () => { renderMembers(); $('membersDialog').showModal(); };
+$('mentionButton').onclick = () => { if ($('mentionList').hidden) mentions(true); else $('mentionList').hidden = true; };
+$('input').oninput = () => { mentions(); renderSelection(); };
+$('input').onkeydown = event => {
+  if (event.key === 'Escape') $('mentionList').hidden = true;
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    const choice = !$('mentionList').hidden && $('mentionList').querySelector('button:not([disabled])');
+    if (choice) choice.click();
+    else $('composer').requestSubmit();
+  }
+};
+$('composer').onsubmit = async event => {
+  event.preventDefault();
+  if (!room || (!$('input').value.trim() && !draftFile)) return;
+  const draft = $('input').value;
+  const mentionsInDraft = typedMentions(draft);
+  const unavailable = mentionsInDraft.find(agent => !agent.id);
+  if (unavailable) return toast(unavailable.name + ' 当前' + unavailable.status);
+  const typed = mentionsInDraft.map(agent => agent.id);
+  const recipients = [...selected, ...typed];
+  const prefix = selected.filter(id => !typed.includes(id)).map(id => '@' + nameOf(id)).join(' ');
+  const text = prefix ? prefix + ' ' + draft : draft;
+  const submit = event.currentTarget.querySelector('button.primary');
+  submit.disabled = true;
+  try {
+    const sourceRoom = roomId;
+    const localFile = draftFile;
+    const message = { text, agents: recipients, scope: $('scope').value, messageIds: contextIds };
+    let payload = message;
+    if (localFile) {
+      if (localFile.size >= 10_000_000 || localFile.size === 0) throw new Error('请选择小于 10 MB 的非空文件');
+      payload = new FormData();
+      payload.append('message', JSON.stringify(message));
+      payload.append('file', localFile);
+    }
+    await api('rooms/' + sourceRoom + '/messages', payload);
+    if (roomId !== sourceRoom) return;
+    if ($('input').value === draft) $('input').value = '';
+    selected = [];
+    if (draftFile === localFile) setDraftFile();
+    $('mentionList').hidden = true;
+    await refresh();
+  } catch (error) { toast(error.message); }
+  finally { submit.disabled = false; }
+};
+$('loginForm').onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const result = await api('login', { name: $('loginName').value, code: $('loginCode').value });
+    token = result.token;
+    sessionStorage.setItem('token', token);
+    $('loginCode').value = '';
+    await refresh();
+  } catch (error) { $('loginError').textContent = error.message; }
+};
+$('logout').onclick = $('mobileLogout').onclick = () => {
+  setTab('inbox');
+  $('workspace').classList.remove('has-room');
+  seen.clear();
+  showLogin();
+};
+$('back').onclick = () => {
+  $('workspace').classList.remove('has-room');
+  if (mobile.matches) {
+    room = roomId = null;
+    renderRoomList();
+  }
+};
+for (const tab of document.querySelectorAll('[data-tab]')) tab.onclick = () => setTab(tab.dataset.tab);
+$('roomSearch').oninput = renderRoomList;
+function createFields() {
+  const kind = $('roomKind').value;
+  $('roomNameLabel').hidden = kind === 'dm';
+  $('people').hidden = kind === 'team';
+  $('teamHint').hidden = kind !== 'team';
+  $('peopleList').replaceChildren(...app.people.map(name => {
+    const label = el('label', undefined, 'person');
+    const input = el('input');
+    input.type = kind === 'dm' ? 'radio' : 'checkbox';
+    input.name = 'member';
+    input.value = name;
+    label.append(input, el('span', name));
+    return label;
+  }));
+}
+$('roomKind').onchange = createFields;
+$('newRoom').onclick = () => { $('createForm').reset(); createFields(); $('createDialog').showModal(); };
+$('createForm').onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const result = await api('rooms', { kind: $('roomKind').value, name: $('roomName').value, users: new FormData($('createForm')).getAll('member') });
+    $('createDialog').close();
+    await openRoom(result.id);
+  } catch (error) { toast(error.message); }
+};
+
+try {
+  const config = await api('config');
+  $('localHint').hidden = !config.local;
+  $('codeLabel').hidden = config.local;
+  if (token) await refresh();
+  else showLogin();
+} catch (error) { showLogin(); toast(error.message); }
+setInterval(refresh, 1000);
+
+$('scope').onchange = () => {
+  if ($('scope').value !== 'selected') return;
+  $('historyList').replaceChildren(...room.messages.filter(message => message.kind !== 'event').slice(-30).reverse().map(message => {
+    const label = el('label', undefined, 'person');
+    const input = el('input');
+    input.type = 'checkbox';
+    input.value = message.id;
+    input.checked = contextIds.includes(message.id);
+    label.append(input, el('span', nameOf(message.sender) + '：' + message.text.slice(0, 75)));
+    return label;
+  }));
+  $('historyDialog').showModal();
+};
+$('historyForm').onsubmit = event => {
+  event.preventDefault();
+  const ids = [...event.currentTarget.querySelectorAll('input:checked')].map(input => input.value);
+  if (ids.length > 12) return toast('最多选择 12 条');
+  contextIds = ids;
+  if (!ids.length) $('scope').value = 'message';
+  $('historyDialog').close();
+};
+
+$('fileInput').onchange = () => setDraftFile($('fileInput').files[0]);
+$('clearFile').onclick = () => setDraftFile();
+$('input').addEventListener('paste', event => {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  const files = Array.from(clipboard.files);
+  if (!files.length) {
+    for (const item of clipboard.items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  setDraftFile(files[0]);
+  if (files.length > 1) toast('每条消息支持一份附件，已选择第一份');
+});
+$('forwardButton').onclick = () => {
+  const teams = app.rooms.filter(item => item.kind === 'team' && item.id !== roomId);
+  if (!teams.length) return toast('请先创建独立 AI 团队');
+  $('forwardTarget').replaceChildren(...teams.map(team => {
+    const option = el('option', titleOf(team));
+    option.value = team.id;
+    return option;
+  }));
+  $('forwardList').replaceChildren(...room.messages.filter(message => message.kind !== 'event').slice(-30).reverse().map(message => {
+    const label = el('label', undefined, 'person');
+    const check = el('input');
+    check.type = 'checkbox';
+    check.value = message.id;
+    label.append(check, el('span', nameOf(message.sender) + '：' + message.text.slice(0, 75)));
+    return label;
+  }));
+  $('forwardDialog').showModal();
+};
+$('forwardForm').onsubmit = async event => {
+  event.preventDefault();
+  const ids = [...event.currentTarget.querySelectorAll('input:checked')].map(input => input.value);
+  if (!ids.length || ids.length > 12) return toast('请选择 1–12 条消息');
+  const target = $('forwardTarget').value;
+  try {
+    await api('rooms/' + roomId + '/forward', { target, ids });
+    $('forwardDialog').close();
+    await openRoom(target);
+    $('scope').value = 'recent';
+  } catch (error) { toast(error.message); }
+};
