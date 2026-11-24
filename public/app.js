@@ -155,14 +155,14 @@ function setTab(tab) {
     row.append(el('span', name.slice(0, 1), 'avatar'), el('strong', name));
     return row;
   });
-  const agents = app.catalog.map(agent => {
+  const agents = listedAgents().map(agent => {
     const row = el('div', undefined, 'contact-row');
     const copy = el('div');
-    copy.append(el('strong', agent.name), el('small', agent.role));
+    copy.append(el('strong', agent.name), el('small', [agent.alias && '@' + agent.alias, agent.status].filter(Boolean).join(' · ')));
     row.append(el('span', 'AI', 'avatar'), copy);
     return row;
   });
-  $('contactList').replaceChildren(el('h2', '联系人'), ...people, el('h2', '可用 Agent'), ...agents);
+  $('contactList').replaceChildren(el('h2', '联系人'), ...people, el('h2', 'Agent'), ...agents);
 }
 
 async function openRoom(id) {
@@ -189,7 +189,7 @@ function renderRoom() {
   $('chat').hidden = false;
   seen.set(roomId, room.messages.at(-1)?.at || Date.now());
   $('roomTitle').textContent = titleOf(room);
-  $('roomSub').textContent = room.kind === 'team' ? '独立 AI 团队 · ' + room.agents.length + ' 位 Agent' : room.kind === 'dm' ? '私聊' : room.users.length + ' 位成员';
+  $('roomSub').textContent = room.kind === 'team' ? '独立 AI 团队 · ' + listedAgents(room).filter(agent => agent.memberId).length + ' 位 Agent' : room.kind === 'dm' ? '私聊' : room.users.length + ' 位成员';
   const snapshot = JSON.stringify(room.messages);
   if (snapshot !== lastFeed) {
     const atBottom = !lastFeed || $('feed').scrollHeight - $('feed').scrollTop - $('feed').clientHeight < 100;
@@ -254,24 +254,24 @@ function renderTasks() {
   if (!items.length) $('taskPanel').append(el('p', '当前会话暂无任务。', 'muted'));
 }
 
-function mentionChoices() {
-  const choices = mentionNames.map(choice => {
-    const id = choice.ids.find(candidate => app.catalog.some(agent => agent.id === candidate) &&
-      (room.kind !== 'team' || room.agents.includes(candidate)));
-    const connected = choice.ids.some(candidate => app.catalog.some(agent => agent.id === candidate));
-    return { ...choice, id, status: connected ? '未加入' : '未接入' };
+function listedAgents(conversation = null) {
+  const definitions = app.catalog.some(agent => agent.id === 'offline')
+    ? [...mentionNames, { ids: ['offline'], name: '离线示例', alias: '' }]
+    : mentionNames;
+  return definitions.map(choice => {
+    const available = choice.ids.filter(id => app.catalog.some(agent => agent.id === id));
+    const memberId = available.find(id => conversation?.agents.includes(id));
+    const activeId = available.find(id => conversation?.tasks?.some(task => task.agent === id && isActive(task)));
+    const availableId = memberId || activeId || available[0];
+    const id = conversation?.kind === 'team' ? memberId : availableId;
+    return { ...choice, id, availableId, memberId, activeId, status: !availableId ? '未接入' : !id ? '未加入' : '' };
   });
-  const offline = app.catalog.find(agent => agent.id === 'offline');
-  if (offline && (room.kind !== 'team' || room.agents.includes(offline.id))) {
-    choices.push({ id: offline.id, name: offline.name, alias: '' });
-  }
-  return choices;
 }
 
 function typedMentions(text) {
   if (!room) return [];
   const lower = text.toLowerCase();
-  return mentionChoices().filter(agent => [agent.name, agent.alias].filter(Boolean).some(value => {
+  return listedAgents(room).filter(agent => [agent.name, agent.alias].filter(Boolean).some(value => {
     const needle = '@' + value.toLowerCase();
     let index = lower.indexOf(needle);
     while (index >= 0) {
@@ -301,7 +301,7 @@ function mentions(force = false) {
     $('mentionList').hidden = true;
     return;
   }
-  const candidates = mentionChoices().filter(agent => !query || [agent.name, agent.alias].some(value => value.toLowerCase().startsWith(query)));
+  const candidates = listedAgents(room).filter(agent => !query || [agent.name, agent.alias].some(value => value.toLowerCase().startsWith(query)));
   $('mentionList').replaceChildren(...candidates.map(agent => {
     const option = button('', () => {
       if (!selected.includes(agent.id)) selected.push(agent.id);
@@ -331,14 +331,19 @@ async function change(action, data) {
 function renderMembers() {
   const list = $('memberList');
   list.replaceChildren(...room.users.map(user => el('p', user + (user === app.user ? ' · 你' : ''))));
-  for (const agent of app.catalog) {
+  for (const agent of listedAgents(room)) {
     const line = el('div', undefined, 'member-line');
-    const assigned = room.agents.includes(agent.id);
-    const temporary = room.tasks.some(task => !task.parent && task.agent === agent.id && isActive(task));
-    line.append(el('span', agent.name + (room.lead === agent.id ? ' · 负责人' : assigned ? ' · 已加入' : temporary ? ' · 临时参与' : '')));
-    if (room.kind !== 'group' || room.owner === app.user) {
-      line.append(button(assigned || temporary ? '移除' : '加入', () => change('members', { agent: agent.id, mode: assigned || temporary ? 'remove' : 'add' })));
-      if (assigned && room.kind === 'team' && room.lead !== agent.id) line.append(button('设为负责人', () => change('members', { agent: agent.id, mode: 'lead' })));
+    const id = agent.memberId || agent.activeId || agent.availableId;
+    const lead = id && room.lead === id;
+    const status = lead ? '负责人' : agent.memberId ? '已加入' : agent.activeId ? '临时参与' : agent.status;
+    const label = el('span', undefined, 'member-agent-copy');
+    label.append(el('strong', agent.name));
+    if (agent.alias || status) label.append(el('small', [agent.alias && '@' + agent.alias, status].filter(Boolean).join(' · ')));
+    line.append(label);
+    if (id && (room.kind !== 'group' || room.owner === app.user)) {
+      const removing = agent.memberId || agent.activeId;
+      line.append(button(removing ? '移除' : '加入', () => change('members', { agent: id, mode: removing ? 'remove' : 'add' })));
+      if (agent.memberId && room.kind === 'team' && !lead) line.append(button('设为负责人', () => change('members', { agent: id, mode: 'lead' })));
     }
     list.append(line);
   }

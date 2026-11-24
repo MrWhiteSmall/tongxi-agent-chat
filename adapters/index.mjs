@@ -17,9 +17,9 @@ const agents = [
   { id: 'maker', name: '制作助手', role: '实现网页工具和小游戏', provider: deepseek ? 'deepseek' : 'qwen' },
   { id: 'review', name: '审校助手', role: '审校内容和检查功能', provider: deepseek ? 'deepseek' : 'qwen' },
   { id: 'qwen', name: 'Qwen', role: '通用助手', provider: 'qwen' },
-  { id: 'codex', name: 'Codex', role: '代码设计与实现', command: 'codex', enabled: local && process.env.ENABLE_CODEX === '1' },
-  { id: 'claude', name: 'Claude', role: '推理与写作', command: 'claude', enabled: local && process.env.ENABLE_CLAUDE === '1' },
-  { id: 'piagent', name: 'PiAgent', role: '代码分析', command: 'pi', enabled: local && !!process.env.PI_MODEL },
+  { id: 'codex', name: 'Codex', role: '代码设计与实现', url: process.env.CODEX_URL, command: 'codex', enabled: local && process.env.ENABLE_CODEX === '1' },
+  { id: 'claude', name: 'Claude', role: '推理与写作', url: process.env.CLAUDE_URL, command: 'claude', enabled: local && process.env.ENABLE_CLAUDE === '1' },
+  { id: 'piagent', name: 'PiAgent', role: '代码分析', url: process.env.PIAGENT_URL, command: 'pi', enabled: local && !!process.env.PI_MODEL },
   { id: 'deepseekharness', name: 'DeepSeek Harness', role: '独立运行时', command: 'dsh', enabled: local && process.env.ENABLE_DSH === '1' && !process.env.DEEPSEEKHARNESS_URL, url: process.env.DEEPSEEKHARNESS_URL },
   ...['mastra', 'ohmygame', 'crewai'].map(id => ({
     id, name: { deepseekharness: 'DeepSeek Harness', mastra: 'Mastra', ohmygame: 'OhMyGame', crewai: 'CrewAI' }[id],
@@ -37,7 +37,7 @@ if (process.env.CHAT_TEST_AGENT === '1') agents.unshift(
 
 export const directory = new Map(agents.filter(a => a.test || a.offline || a.url || a.enabled || providers[a.provider]?.key).map(a => [a.id, a]));
 
-async function cli(agent, prompt, signal) {
+export async function cli(agent, prompt, signal) {
   const cwd = await mkdtemp(join(tmpdir(), 'agent-chat-'));
   try {
     const args = {
@@ -46,11 +46,19 @@ async function cli(agent, prompt, signal) {
       dsh: ['--profile', 'headless', '--permission-mode', 'read-only', '--approval-policy', 'never', '-'],
       pi: ['-p', '--no-session', '--no-tools', '--no-extensions', '--no-mcp', '--model', process.env.PI_MODEL || '']
     }[agent.command];
+    const worker = process.env.TONGXI_WORKER === '1';
+    if (worker && agent.command === 'codex') {
+      args.splice(-1, 0, '--disable', 'shell_tool', '--disable', 'unified_exec', '-m', 'deepseek-flash', '-c', 'model_provider="deepseek"',
+        '-c', 'model_providers.deepseek.name="DeepSeek"',
+        '-c', 'model_providers.deepseek.base_url="https://api.deepseek.com"',
+        '-c', 'model_providers.deepseek.wire_api="responses"',
+        '-c', 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"');
+    }
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/KEY|TOKEN|SECRET|PASSWORD/i.test(key) && !(
         (agent.command === 'claude' && /^ANTHROPIC_/.test(key)) ||
-        (['pi', 'dsh'].includes(agent.command) && /^(DEEPSEEK|DASHSCOPE|QWEN)_API_KEY$/.test(key))
+        ((['pi', 'dsh'].includes(agent.command) || (worker && agent.command === 'codex')) && /^(DEEPSEEK|DASHSCOPE|QWEN)_API_KEY$/.test(key))
       )) delete env[key];
     }
     const output = await new Promise((resolve, reject) => {

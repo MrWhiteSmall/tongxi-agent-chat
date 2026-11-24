@@ -14,3 +14,4 @@ dialog{border:1px solid var(--edge);border-radius:16px;padding:22px;color:inheri
 
 #taskButton{flex:none;white-space:nowrap}#taskCount{display:inline-block;border-radius:9px;background:#23634e;color:white;font-size:11px;padding:1px 5px;margin-left:4px}#chat header>div{min-width:0}#roomTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mention-option{display:flex;align-items:center;gap:10px;justify-content:space-between}.mention-option small{font-size:11px}.mention-option:disabled{cursor:default}
+.member-agent-copy{display:grid;gap:3px}.member-agent-copy small{font-size:11px}.member-agent-copy strong{font-size:14px}

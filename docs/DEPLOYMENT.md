@@ -44,3 +44,5 @@ Qwen 模型 ID 与工作空间配置参考 [百炼兼容接口](https://help.ali
 备份时同时保留 SQLite 和 OSS 对象。部署资源模板在 `scripts/ecs`。安装 Nginx 示例前，替换示例域名和 TLS 证书路径。账户登录码保存在服务器权限受限的环境文件中，分发给对应成员即可。
 
 内测实例每天北京时间 04:00 通过 `tongxi-cleanup.timer` 清空聊天消息、任务及其可运行产物，删除同席记录的 OSS 附件。账号、会话和成员设置保留。OSS 专用账号需额外拥有同一附件前缀的删除权限。清理过程暂时拒绝写请求，失败后定时重试，同日重试仅处理未删附件。内测请勿使用此实例长期存放需要保留的内容。
+
+可选编码 Agent 工作者运行在独立系统账号下，监听回环地址 4318。安装 Codex CLI、Claude Code 和 Pi CLI 到 `/opt/tongxi/agent-cli`，配置 `/etc/tongxi/agents.env` 中的 DeepSeek API 和工作者令牌，再启用 `tongxi-agent-worker.service`。主服务可通过 `CLAUDE_URL`、`CODEX_URL`、`PIAGENT_URL` 与对应的 `_TOKEN` 调用。工作者一次执行一个任务，当前提供文本与代码产物，远端模式禁用直接 shell 工具。实际游戏运行时可由独立服务提供 `OHMYGAME_URL`。

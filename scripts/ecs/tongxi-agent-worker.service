@@ -1,0 +1,29 @@
+[Unit]
+Description=Tongxi isolated coding agent worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=tongxi-agents
+Group=tongxi-agents
+StateDirectory=tongxi-agents
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/tongxi-agents
+EnvironmentFile=/etc/tongxi/agents.env
+Environment=PATH=/opt/tongxi/agent-cli/node_modules/.bin:/opt/tongxi/node/bin:/usr/bin:/bin
+Environment=HOME=/var/lib/tongxi-agents
+UMask=0077
+ExecStart=/opt/tongxi/node/bin/node /opt/tongxi/app/scripts/ecs/agent-worker.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+InaccessiblePaths=/var/lib/tongxi /etc/tongxi
+MemoryHigh=400M
+MemoryMax=500M
+TasksMax=96
+
+[Install]
+WantedBy=multi-user.target
