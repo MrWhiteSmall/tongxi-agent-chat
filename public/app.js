@@ -132,7 +132,6 @@ async function refresh() {
     $('login').hidden = true;
     $('workspace').hidden = false;
     $('identity').textContent = app.user;
-    $('input').placeholder = app.bailian ? '输入消息，@ Agent 或 /百炼' : '输入消息，按 @ 邀请 Agent';
     const snapshot = JSON.stringify(app.rooms);
     if (snapshot !== lastRooms) {
       lastRooms = snapshot;
@@ -618,7 +617,7 @@ function renderSelection() {
     selected = selected.filter(item => item !== id);
     renderSelection();
   }, 'chip')));
-  $('scopeLabel').hidden = !selected.length && !typedMentions($('input').value).length && room?.kind !== 'team' && !/^\s*\/(?:百炼|bailian)\b|^\s*\/百炼(?:\s|$)/i.test($('input').value);
+  $('scopeLabel').hidden = !selected.length && !typedMentions($('input').value).length && room?.kind !== 'team';
 }
 
 function mentions(force = false) {

@@ -9,24 +9,9 @@ const imageModel = process.env.BAILIAN_IMAGE_MODEL || 'qwen-image-2.1-turbo';
 const searchModel = process.env.BAILIAN_SEARCH_MODEL || 'qwen-flash';
 const videoModel = process.env.BAILIAN_VIDEO_MODEL || 'wan2.7-t2v';
 const imageVideoModel = process.env.BAILIAN_IMAGE_VIDEO_MODEL || 'wan2.6-i2v-flash';
-const actionNames = { 生图: 'image', 改图: 'edit', 视频: 'video', 首帧: 'video', 首尾帧: 'video', 参考视频: 'video', 模型: 'model', 搜索: 'search', search: 'search', image: 'image', edit: 'edit', video: 'video', model: 'model' };
-
-export function bailianCommand(text, allowNatural = false) {
+export function bailianIntent(text) {
   const prompt = text.replace(/^(?:@[\w-]+\s*)+/u, '').trim();
-  const explicit = prompt.match(/^\/(?:百炼|bailian)\s+(生图|改图|视频|首帧|首尾帧|参考视频|模型|搜索|image|edit|video|model|search)(?:\s+([\s\S]*))?$/i);
-  if (explicit) {
-    const kind = actionNames[explicit[1].toLowerCase()];
-    const rest = explicit[2]?.trim() || '';
-    if (kind !== 'model') {
-      const mode = ({ 首帧: 'first', 首尾帧: 'frames', 参考视频: 'reference' })[explicit[1]];
-      return { kind, prompt: rest, ...(mode ? { mode } : {}) };
-    }
-    const model = rest.match(/^([\w./-]{1,120})\s+([\s\S]+)$/);
-    return { kind, model: model?.[1], prompt: model?.[2] || '' };
-  }
-  const manual = prompt.match(/^\/(?:百炼|bailian)(?:\s+([\s\S]+))?$/i);
-  if (manual) return { kind: 'intent', prompt: manual[1]?.trim() || '', manual: true };
-  if (allowNatural && bailianEnabled && prompt) return { kind: 'intent', prompt };
+  if (bailianEnabled && prompt) return { kind: 'intent', prompt };
 }
 
 async function request(endpoint, payload, signal, async = false) {
@@ -42,6 +27,22 @@ async function request(endpoint, payload, signal, async = false) {
   }
   return data;
 }
+
+const modelTool = {
+  type: 'function',
+  function: {
+    name: 'model',
+    description: '用户明确要求调用指定模型 ID 执行聊天或分析任务时使用。询问模型信息或仅提到模型时不调用。媒体生成或编辑按对应媒体工具处理。',
+    parameters: {
+      type: 'object',
+      properties: {
+        model: { type: 'string', description: '用户指定的百炼兼容聊天模型 ID，保留原样' },
+        prompt: { type: 'string', description: '用户交给该模型的完整任务' }
+      },
+      required: ['model', 'prompt']
+    }
+  }
+};
 
 const semanticTools = [
   ['image', '生成一张独立的新图片、插画或视觉场景，不要求沿用已共享图片中的特定人物或对象。没有原图的「生成一只杜宾犬」属于生图。'],
@@ -59,10 +60,10 @@ const semanticTools = [
 
 export async function chooseBailianAction(command, images, quoted, signal) {
   if (!command.prompt) return null;
-  let offered = semanticTools;
+  let offered = [...semanticTools, modelTool];
   if (mediaMcpEnabled) {
     try {
-      offered = [semanticTools.find(tool => tool.function.name === 'search'),
+      offered = [semanticTools.find(tool => tool.function.name === 'search'), modelTool,
         ...contextualMediaTools(await listMediaTools(AbortSignal.any([signal, AbortSignal.timeout(12_000)])), images.length)];
     } catch {
       signal.throwIfAborted();
@@ -94,11 +95,16 @@ export async function chooseBailianAction(command, images, quoted, signal) {
   if (kind === 'image' && images.length && referencedFraming && !wantsDifferentSubject) kind = 'edit';
   let mediaArgs;
   try { mediaArgs = JSON.parse(call.arguments); } catch {}
+  if (kind === 'model' && (typeof mediaArgs?.model !== 'string' ||
+      !/^[A-Za-z0-9][\w./-]{0,119}$/.test(mediaArgs.model) || !command.prompt.includes(mediaArgs.model))) {
+    throw new Error('请提供完整的百炼聊天模型 ID');
+  }
   const suggested = mediaArgs?.prompt;
   // Editing keeps the original instruction so the selector cannot drop change constraints.
   const prompt = kind !== 'edit' && !(kind === 'video' && images.length) && typeof suggested === 'string' && suggested.trim()
     ? suggested.trim().slice(0, 6000) : command.prompt;
   return { kind, prompt, originalPrompt: command.prompt, automatic: true,
+    ...(kind === 'model' ? { model: mediaArgs.model } : {}),
     ...(kind === mediaToolKind(call.name) ? { mediaTool: call.name, mediaArgs } : {})
   };
 }
@@ -159,7 +165,7 @@ export function bailianUsesImages(command) {
 
 export async function runBailian(command, images, signal, onStatus = () => {}, assetCount = images.length) {
   if (!bailianEnabled) throw new Error('百炼 API Key 未配置');
-  if (!command.prompt) throw new Error('请输入百炼指令和提示词。模型调用格式：/百炼 模型 <模型ID> <问题>');
+  if (!command.prompt) throw new Error('请输入要交给百炼处理的内容');
   if (mediaMcpEnabled && ['image', 'edit', 'video'].includes(command.kind)) {
     if (command.kind === 'video' && command.mode === 'first' && assetCount !== 1) throw new Error('首帧模式需要正好一张图');
     return runMediaTool(command, images, signal, onStatus, assetCount);

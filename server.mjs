@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { attachments, attachmentPreviewType, imageMime, maxFileBytes } from './adapters/attachments.mjs';
-import { bailianCommand, bailianEnabled, bailianImageUrl, bailianMediaUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
+import { bailianIntent, bailianEnabled, bailianImageUrl, bailianMediaUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
 import { mediaMcpEnabled } from './adapters/media-mcp.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acceptsImages, directory, runAgent } from './adapters/index.mjs';
@@ -169,7 +169,6 @@ async function execute(task, context, files, existingImages, command, quoted) {
     if (action?.kind === 'intent') {
       status('正在分析是否需要调用工具。');
       action = await chooseBailianAction(command, images, quoted, controller.signal);
-      if (!action && command.manual) throw new Error('请指定百炼操作，例如 /百炼 生图、/百炼 改图、/百炼 视频或 /百炼 搜索');
       if ((bailianUsesImages(action) && !useMcp) || (!action && acceptsImages(agent))) {
         images = await imageInputs(files, controller.signal, true);
       }
@@ -556,12 +555,8 @@ createServer(async (req, res) => {
         items.push({ id: randomUUID(), name, data: encoded });
       }
       const ids = eligible(room, Array.isArray(input.agents) ? input.agents : []);
-      const command = bailianCommand(content, ids.length === 1 || (room.kind === 'team' && !ids.length && directory.has(room.lead)));
-      if (command && !bailianEnabled) fail(503, '百炼 API Key 未配置');
-      if (room.kind === 'team' && !ids.length && room.lead && directory.has(room.lead)) ids.push(room.lead);
-      if (command && !ids.length && directory.has('qwen')) ids.push('qwen');
-      if (command && ids.length > 1) fail(400, '一次百炼任务请选择一个 Agent');
-      if (command?.kind === 'video' && Object.values(state.tasks).some(task => task.capability === 'bailian-video' && ['queued', 'running'].includes(task.status))) fail(429, '已有百炼视频正在生成，请稍后再试');
+      if (room.kind === 'team' && !ids.length && directory.has(room.lead)) ids.push(room.lead);
+      const command = ids.length === 1 ? bailianIntent(content) : undefined;
       if (ids.length && runningTaskCount(room) + ids.length > 3) fail(429, '当前会话最多同时运行三个任务');
       const pending = Object.values(state.tasks).filter(task => !task.parent && ['queued', 'running'].includes(task.status)).length;
       if (ids.length && pending + ids.length > 8) fail(429, 'Agent 正忙，请稍后重试');
