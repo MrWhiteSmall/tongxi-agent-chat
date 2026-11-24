@@ -4,8 +4,8 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { attachments, imageMime, maxFileBytes } from './adapters/attachments.mjs';
-import { bailianCommand, bailianEnabled, bailianImageUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
+import { attachments, attachmentPreviewType, imageMime, maxFileBytes } from './adapters/attachments.mjs';
+import { bailianCommand, bailianEnabled, bailianImageUrl, bailianMediaUrl, bailianSourceList, bailianUsesImages, chooseBailianAction, runBailian, searchBailian } from './adapters/bailian.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acceptsImages, directory, runAgent } from './adapters/index.mjs';
 
@@ -344,7 +344,7 @@ createServer(async (req, res) => {
     if (req.method === 'POST' && cleaning) fail(503, '正在进行每日清理，请稍后重试');
     if (req.method === 'GET' && assets.has(path)) {
       const [type, file] = assets.get(path);
-      res.setHeader('Content-Security-Policy', "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+      res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: https://*.oss-accelerate.aliyuncs.com; media-src 'self' blob: https://*.oss-accelerate.aliyuncs.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
       res.writeHead(200, { 'Content-Type': type });
       return res.end(readFileSync(new URL('./public/' + file, import.meta.url)));
     }
@@ -406,7 +406,18 @@ createServer(async (req, res) => {
     const action = match[2];
     if (!action && req.method === 'GET') {
       const tasks = Object.values(state.tasks).filter(task => task.room === room.id && task.status).map(({ html, result, ...task }) => ({ ...task, ...(task.parent && result ? { preview: result.slice(0, 900) } : {}) }));
-      return json({ ...room, messages: room.messages.slice(-200), tasks });
+      const messages = room.messages.slice(-200).map(message => {
+        const file = message.attachment && state.files?.[message.attachment.id];
+        if (file && !file.revoked) {
+          return { ...message, attachment: { ...message.attachment, size: file.size ?? (file.data ? Buffer.byteLength(file.data, 'base64') : undefined), previewType: attachmentPreviewType(file) } };
+        }
+        const task = message.kind === 'agent' && state.tasks[message.task];
+        if (!task || task.room !== room.id || !['bailian-image', 'bailian-edit', 'bailian-video'].includes(task.capability)) return message;
+        const kind = task.capability === 'bailian-video' ? 'video' : 'image';
+        const mediaUrl = bailianMediaUrl(task.result || '', kind);
+        return mediaUrl ? { ...message, media: { kind, url: mediaUrl } } : message;
+      });
+      return json({ ...room, messages, tasks });
     }
     if (action === 'artifact' && req.method === 'GET') {
       const task = state.tasks[url.searchParams.get('task')];
@@ -419,12 +430,16 @@ createServer(async (req, res) => {
     if (action === 'attachment' && req.method === 'GET') {
       const file = state.files?.[url.searchParams.get('id')];
       if (!file || file.room !== room.id || file.revoked) fail(404, '文件不存在');
-      if (!file.storage && url.searchParams.get('download') !== '1') return json({ name: file.name, data: file.data });
+      const preview = url.searchParams.get('preview') === '1';
+      const previewType = preview && attachmentPreviewType(file);
+      if (preview && !previewType) fail(415, '这类文件可下载查看');
+      if (!file.storage && !preview && url.searchParams.get('download') !== '1') return json({ name: file.name, data: file.data });
       if (file.storage && file.storage !== storage.kind) fail(503, '附件存储暂不可用');
       const source = file.storage ? await storage.get(file.id) : Readable.from([Buffer.from(file.data, 'base64')]);
       res.writeHead(200, {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(file.name.toWellFormed()).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16)),
+        'Content-Type': previewType || 'application/octet-stream',
+        'Content-Disposition': (preview ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encodeURIComponent(file.name.toWellFormed()).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16)),
+        ...(preview ? { 'Content-Security-Policy': "default-src 'none'; sandbox" } : {}),
         ...(file.size ? { 'Content-Length': file.size } : {})
       });
       return await pipeline(source, res);

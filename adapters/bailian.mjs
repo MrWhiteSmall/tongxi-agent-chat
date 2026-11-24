@@ -75,8 +75,10 @@ export async function chooseBailianAction(command, images, quoted, signal) {
   return { kind: call.name, prompt, automatic: true };
 }
 
-export function bailianImageUrl(text) {
-  const match = text.match(/\[打开图片\]\(<(https:\/\/[^>]+)>\)/);
+export function bailianMediaUrl(text, kind) {
+  const match = kind === 'video'
+    ? text.match(/\[打开视频\]\(<(https:\/\/[^>]+)>\)/)
+    : text.match(/\[打开图片\]\(<(https:\/\/[^>]+)>\)/);
   if (!match) return;
   try {
     const url = new URL(match[1]);
@@ -90,6 +92,10 @@ function resultLink(url, label) {
     if (parsed.protocol === 'https:') return '[' + label + '](<' + parsed.href.replace(/[<>]/g, c => encodeURIComponent(c)) + '>)';
   } catch {}
   throw new Error('百炼未返回有效的产物链接');
+}
+
+export function bailianImageUrl(text) {
+  return bailianMediaUrl(text, 'image');
 }
 
 export async function searchBailian(prompt, signal) {

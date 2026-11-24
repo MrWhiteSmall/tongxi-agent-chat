@@ -66,6 +66,8 @@ let artifactSource;
 let lastFeed = '';
 let lastTasks = '';
 let lastRooms = '';
+const thumbnails = new Map();
+let thumbnailObserver;
 const seen = new Map();
 const mobile = matchMedia('(max-width:640px)');
 const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -103,6 +105,8 @@ async function api(path, data) {
 function showLogin() {
   token = null;
   sessionStorage.removeItem('token');
+  if ($('attachmentDialog').open) $('attachmentDialog').close();
+  clearThumbnails();
   app = room = roomId = null;
   lastRooms = lastFeed = lastTasks = '';
   $('login').hidden = false;
@@ -197,6 +201,8 @@ function setTab(tab) {
 }
 
 async function openRoom(id) {
+  if ($('attachmentDialog').open) $('attachmentDialog').close();
+  clearThumbnails();
   roomId = id;
   const item = app.rooms.find(item => item.id === id);
   seen.set(id, item?.lastAt || Date.now());
@@ -322,6 +328,167 @@ function bindMessageActions(element, message) {
   for (const event of ['pointerup', 'pointercancel', 'pointerleave']) element.addEventListener(event, clear);
 }
 
+function clearThumbnails() {
+  thumbnailObserver?.disconnect();
+  for (const item of thumbnails.values()) if (item.url) URL.revokeObjectURL(item.url);
+  thumbnails.clear();
+}
+
+function fileSize(size) {
+  if (!Number.isFinite(size)) return '';
+  if (size < 1024) return size + ' B';
+  if (size < 1024 ** 2) return (size / 1024).toFixed(1) + ' KB';
+  return (size / 1024 ** 2).toFixed(1) + ' MB';
+}
+
+function attachmentBlob(file, sourceRoom, preview) {
+  return fetch('api/rooms/' + sourceRoom + '/attachment?' + (preview ? 'preview=1' : 'download=1') +
+    '&id=' + encodeURIComponent(file.id), { headers: { Authorization: 'Bearer ' + token } }).then(response => {
+    if (!response.ok) throw new Error(preview ? '暂时无法预览附件' : '附件下载失败');
+    return response.blob();
+  });
+}
+
+function thumbnail(file, sourceRoom) {
+  let item = thumbnails.get(file.id);
+  if (!item) {
+    item = {};
+    item.loading = attachmentBlob(file, sourceRoom, true).then(blob => {
+      if (thumbnails.get(file.id) !== item) return '';
+      item.url = URL.createObjectURL(blob);
+      return item.url;
+    }).catch(() => {
+      if (thumbnails.get(file.id) === item) thumbnails.delete(file.id);
+      return '';
+    });
+    thumbnails.set(file.id, item);
+  }
+  return item.loading;
+}
+
+function imageThumbnail(load, label, id) {
+  const image = el('img', undefined, 'card-thumbnail');
+  image.alt = label;
+  image.loading = 'lazy';
+  if (id) image.dataset.file = id;
+  else void load().then(url => { if (url) image.src = url; });
+  image.addEventListener('error', () => {
+    image.replaceWith(el('span', '缩略图暂不可用', 'media-fallback'));
+  });
+  return image;
+}
+
+async function openMediaCard(card, sourceRoom) {
+  let objectUrl;
+  const dialog = $('attachmentDialog');
+  try {
+    const kind = card.kind;
+    const file = card.file;
+    const name = card.name;
+    const view = $('attachmentView');
+    let element;
+    if (kind === 'text') {
+      const blob = await attachmentBlob(file, sourceRoom, true);
+      element = el('pre', await blob.slice(0, 65536).text());
+    } else {
+      let url = card.url;
+      if (!url && kind === 'image') url = await thumbnail(file, sourceRoom);
+      if (!url && file) {
+        objectUrl = URL.createObjectURL(await attachmentBlob(file, sourceRoom, true));
+        url = objectUrl;
+      }
+      if (!url) throw new Error('暂时无法预览附件');
+      element = el(kind === 'image' ? 'img' : kind);
+      if (kind === 'image') element.alt = name;
+      else { element.controls = true; element.playsInline = true; element.preload = 'metadata'; }
+      element.src = url;
+      element.addEventListener('error', () => {
+        if (element.isConnected) element.replaceWith(el('p', '预览暂不可用，请尝试打开原文件。', 'muted'));
+      });
+    }
+    if (roomId !== sourceRoom || dialog.open) {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      return;
+    }
+    $('attachmentTitle').textContent = name;
+    view.replaceChildren(element);
+    dialog.showModal();
+    dialog.addEventListener('close', () => {
+      view.replaceChildren();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }, { once: true });
+  } catch (error) {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    toast(error.message);
+  }
+}
+
+function renderAttachmentCard(message, sourceRoom) {
+  const file = message.attachment;
+  const media = message.media;
+  const kind = media?.kind || file.previewType?.split('/')[0] || 'file';
+  const name = file?.name || (kind === 'video' ? '百炼视频' : '百炼图片');
+  const section = el('section', undefined, 'attachment-card');
+  const card = { kind, name, file, url: media?.url };
+  if (kind === 'image') {
+    const zoom = button('', () => openMediaCard(card, sourceRoom), 'attachment-thumb');
+    zoom.setAttribute('aria-label', '预览 ' + name);
+    zoom.append(imageThumbnail(media ? () => Promise.resolve(media.url) : () => thumbnail(file, sourceRoom), name, file?.id));
+    section.append(zoom);
+  } else if (kind === 'video' || kind === 'audio') {
+    const play = button(kind === 'video' ? '▷ 播放视频' : '▷ 播放音频', () => openMediaCard(card, sourceRoom), 'attachment-play ' + kind);
+    section.append(play);
+  }
+  const footer = el('div', undefined, 'attachment-meta');
+  const label = el('div', undefined, 'attachment-label');
+  label.append(el('strong', name));
+  const size = fileSize(file?.size);
+  if (size) label.append(el('small', size));
+  footer.append(label);
+  if (kind === 'text') footer.append(button('预览', () => openMediaCard(card, sourceRoom)));
+  if (file) {
+    const download = button('下载', async () => {
+      try { downloadFile(await attachmentBlob(file, sourceRoom, false), file.name); }
+      catch (error) { toast(error.message); }
+    });
+    download.setAttribute('aria-label', '下载 ' + name);
+    footer.append(download);
+  } else {
+    const link = el('a', '打开原文件', 'attachment-open');
+    link.href = media.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    footer.append(link);
+  }
+  section.append(footer);
+  return section;
+}
+
+function loadVisibleThumbnails(sourceRoom) {
+  thumbnailObserver?.disconnect();
+  const files = new Map(room.messages.filter(message => message.attachment).map(message => [message.attachment.id, message.attachment]));
+  for (const [id, item] of thumbnails) {
+    if (!files.has(id)) {
+      if (item.url) URL.revokeObjectURL(item.url);
+      thumbnails.delete(id);
+    }
+  }
+  thumbnailObserver = new IntersectionObserver(entries => {
+    for (const { target, isIntersecting } of entries) {
+      if (!isIntersecting) continue;
+      thumbnailObserver.unobserve(target);
+      const file = files.get(target.dataset.file);
+      if (!file) continue;
+      void thumbnail(file, sourceRoom).then(url => {
+        if (!target.isConnected || roomId !== sourceRoom) return;
+        if (url) target.src = url;
+        else target.replaceWith(el('span', '缩略图暂不可用', 'media-fallback'));
+      });
+    }
+  }, { root: $('feed'), rootMargin: '150px' });
+  for (const image of $('feed').querySelectorAll('img[data-file]')) thumbnailObserver.observe(image);
+}
+
 function renderRoom() {
   $('empty').hidden = true;
   $('chat').hidden = false;
@@ -351,20 +518,20 @@ function renderRoom() {
       if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.recalled ? '消息已撤回' : (source.text || source.attachment?.name || '').slice(0, 100))));
       if (message.text) {
         const bubble = el('div', undefined, 'bubble');
-        bubble.innerHTML = markdown.render(message.text);
+        bubble.innerHTML = markdown.render(message.media ? message.text.split('\n\n')[0] : message.text);
         details.append(bubble);
       }
       if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
-      if (message.attachment) details.append(button('下载 ' + message.attachment.name, async () => {
-        try {
-          const response = await fetch('api/rooms/' + roomId + '/attachment?download=1&id=' + encodeURIComponent(message.attachment.id), {
-            headers: { Authorization: 'Bearer ' + token }
-          });
-          if (!response.ok) throw new Error('附件下载失败');
-          downloadFile(await response.blob(), message.attachment.name);
-        } catch (error) { toast(error.message); }
-      }));
-      if (message.artifact) details.append(button('打开预览', () => showArtifact(message.task)));
+      if (message.attachment || message.media) details.append(renderAttachmentCard(message, roomId));
+      if (message.artifact) {
+        const card = el('section', undefined, 'attachment-card');
+        const footer = el('div', undefined, 'attachment-meta');
+        const label = el('div', undefined, 'attachment-label');
+        label.append(el('strong', 'HTML 产物'));
+        footer.append(label, button('打开预览', () => showArtifact(message.task)));
+        card.append(footer);
+        details.append(card);
+      }
       const reply = button('回复', () => quoteMessage(message), 'reply-action');
       bindMessageActions(details, message);
       reply.setAttribute('aria-label', '回复 ' + speakerName(message) + ' 的消息');
@@ -373,6 +540,7 @@ function renderRoom() {
       return [...timestamp, row];
     }));
     if (atBottom) $('feed').scrollTop = $('feed').scrollHeight;
+    loadVisibleThumbnails(roomId);
   }
   const activeCount = room.tasks.filter(task => !task.parent && isActive(task)).length;
   $('taskCount').textContent = activeCount;

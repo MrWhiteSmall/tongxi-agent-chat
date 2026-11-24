@@ -53,6 +53,12 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   const originalMessage = (await request('A', 'rooms/' + dm)).messages[0];
   assert.equal((await request('A', 'rooms/' + dm + '/attachment?id=' + originalMessage.attachment.id)).data, 'T0s=');
   await request('C', 'rooms/' + dm, undefined, 404);
+  const inline = await fetch(server.base + '/api/rooms/' + dm + '/attachment?preview=1&id=' + originalMessage.attachment.id, {headers:{Authorization:'Bearer ' + tokens.B}});
+  assert.equal(inline.status, 200);
+  assert.equal(inline.headers.get('content-type'), 'text/plain');
+  assert.equal(await inline.text(), 'OK');
+  assert.equal((await fetch(server.base + '/api/rooms/' + dm + '/attachment?preview=1&id=' + originalMessage.attachment.id, {headers:{Authorization:'Bearer ' + tokens.C}})).status, 404);
+
   async function upload(size) {
     const form = new FormData();
     form.set('message', JSON.stringify({text:''}));
