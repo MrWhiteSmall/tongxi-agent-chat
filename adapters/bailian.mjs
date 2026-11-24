@@ -7,6 +7,7 @@ const native = (process.env.DASHSCOPE_HTTP_BASE_URL || compatible.replace(/\/com
 const imageModel = process.env.BAILIAN_IMAGE_MODEL || 'qwen-image-2.1-turbo';
 const searchModel = process.env.BAILIAN_SEARCH_MODEL || 'qwen-flash';
 const videoModel = process.env.BAILIAN_VIDEO_MODEL || 'wan2.7-t2v';
+const imageVideoModel = process.env.BAILIAN_IMAGE_VIDEO_MODEL || 'wan2.6-i2v-flash';
 const actionNames = { 生图: 'image', 改图: 'edit', 视频: 'video', 模型: 'model', 搜索: 'search', search: 'search', image: 'image', edit: 'edit', video: 'video', model: 'model' };
 
 export function bailianCommand(text, allowNatural = false) {
@@ -41,7 +42,7 @@ async function request(endpoint, payload, signal, async = false) {
 const semanticTools = [
   ['image', '生成一张独立的新图片、插画或视觉场景，不要求沿用已共享图片中的特定人物或对象。没有原图的「生成一只杜宾犬」属于生图。'],
   ['edit', '参照现有图片修改、局部替换、扩图、更换镜头或构图，以及沿用现有图中的同一人物或对象生成新视角。包括「把这个美女的全身照生成出来」「给这只猫换个角度」「颜色再淡一点」。即使缺图也应识别为改图。'],
-  ['video', '生成视频或短片。'],
+  ['video', '生成视频或短片，包括用当前已共享图片的人物或场景做视频。'],
   ['search', '联网搜索、查证或获取需要实时来源的事实。']
 ].map(([name, description]) => ({
   type: 'function',
@@ -75,7 +76,7 @@ export async function chooseBailianAction(command, images, quoted, signal) {
   let suggested;
   try { suggested = JSON.parse(call.arguments).prompt; } catch {}
   // Editing keeps the original instruction so the selector cannot drop change constraints.
-  const prompt = kind !== 'edit' && typeof suggested === 'string' && suggested.trim()
+  const prompt = kind !== 'edit' && !(kind === 'video' && images.length) && typeof suggested === 'string' && suggested.trim()
     ? suggested.trim().slice(0, 6000) : command.prompt;
   return { kind, prompt, automatic: true };
 }
@@ -131,7 +132,7 @@ export function bailianSourceList(sources) {
 }
 
 export function bailianUsesImages(command) {
-  return command?.kind === 'edit' || (command?.kind === 'model' && /(?:^|[-/])vl(?:-|$)/i.test(command.model || ''));
+  return ['edit', 'video'].includes(command?.kind) || (command?.kind === 'model' && /(?:^|[-/])vl(?:-|$)/i.test(command.model || ''));
 }
 
 export async function runBailian(command, images, signal, onStatus = () => {}) {
@@ -154,17 +155,24 @@ export async function runBailian(command, images, signal, onStatus = () => {}) {
     return output;
   }
   if (command.kind === 'video') {
+    const reference = images.find(image => image.url);
+    if (command.requiresImage && !reference) throw new Error('需要可读取的原图，请重新引用或上传图片再生成视频');
+    const model = reference ? imageVideoModel : videoModel;
+    const input = reference ? {
+      prompt: '以所给图片作为首帧和主体参考，保留图中人物或物体的身份与外观。' + command.prompt,
+      img_url: reference.url
+    } : { prompt: command.prompt };
     const data = await request(native + '/services/aigc/video-generation/video-synthesis', {
-      model: videoModel, input: { prompt: command.prompt },
-      parameters: { resolution: '720P', duration: 5, ratio: '16:9' }
+      model, input,
+      parameters: { resolution: '720P', duration: 5, ...(reference ? {} : { ratio: '16:9' }) }
     }, signal, true);
     const id = data.output?.task_id;
     if (!id) throw new Error('百炼未返回视频任务编号');
-    onStatus('百炼已接单，正在生成 5 秒视频。');
+    onStatus(reference ? '百炼已接单，正用参考图生成 5 秒视频。' : '百炼已接单，正在生成 5 秒视频。');
     for (;;) {
       await wait(5000, null, { signal });
       const { output } = await request(native + '/tasks/' + encodeURIComponent(id), null, signal);
-      if (output?.task_status === 'SUCCEEDED') return '百炼视频已生成。模型：`' + videoModel + '`。\n\n' + resultLink(output.video_url, '打开视频');
+      if (output?.task_status === 'SUCCEEDED') return (reference ? '百炼图生视频已生成，使用了参考图。模型：`' : '百炼视频已生成。模型：`') + model + '`。\n\n' + resultLink(output.video_url, '打开视频');
       if (!['PENDING', 'RUNNING'].includes(output?.task_status)) throw new Error('百炼视频生成未完成（' + (output?.task_status || '未知状态') + '）');
     }
   }
