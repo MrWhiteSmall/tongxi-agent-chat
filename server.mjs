@@ -206,6 +206,7 @@ async function body(req, limit = 80_000) {
 const assets = new Map([
   ['/', ['text/html; charset=utf-8', 'index.html']],
   ['/app.js', ['text/javascript; charset=utf-8', 'app.js']],
+  ['/vendor/markdown-it.mjs', ['text/javascript; charset=utf-8', 'vendor/markdown-it.mjs']],
   ['/style.css', ['text/css; charset=utf-8', 'style.css']]
 ]);
 const attempts = new Map();

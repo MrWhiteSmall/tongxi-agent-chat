@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, shell: systemShell } = require('electron');
 const { spawn } = require('node:child_process');
 const { join } = require('node:path');
 const { createServer } = require('node:net');
@@ -61,7 +61,12 @@ if (lock) app.whenReady().then(async () => {
     title: '同席', backgroundColor: '#eff5ef',
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
   });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void systemShell.openExternal(url).catch(() => {});
+    }
+    return { action: 'deny' };
+  });
   window.webContents.on('will-navigate', (event, url) => {
     if (new URL(url).origin !== address) event.preventDefault();
   });

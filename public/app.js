@@ -1,3 +1,19 @@
+import MarkdownIt from './vendor/markdown-it.mjs';
+
+const markdown = new MarkdownIt({ html: false, breaks: true });
+markdown.validateLink = value => /^https?:\/\//i.test(value);
+markdown.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
+  tokens[index].attrSet('target', '_blank');
+  tokens[index].attrSet('rel', 'noopener noreferrer');
+  return renderer.renderToken(tokens, index, options);
+};
+markdown.renderer.rules.image = (tokens, index) => {
+  const token = tokens[index];
+  const label = markdown.utils.escapeHtml(token.content || '查看图片');
+  const url = markdown.utils.escapeHtml(token.attrGet('src') || '');
+  return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+};
+
 const $ = id => document.getElementById(id);
 const el = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -219,7 +235,11 @@ function renderRoom() {
       details.append(el('div', (message.kind === 'human' ? message.sender : nameOf(message.sender)) + (message.kind === 'agent' ? ' · Agent' : ''), 'sender'));
       const source = room.messages.find(item => item.id === message.reply);
       if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.text || source.attachment?.name || '').slice(0, 100)));
-      details.append(el('div', message.text, 'bubble'));
+      if (message.text) {
+        const bubble = el('div', undefined, 'bubble');
+        bubble.innerHTML = markdown.render(message.text);
+        details.append(bubble);
+      }
       if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
       if (message.attachment) details.append(button('下载 ' + message.attachment.name, async () => {
         try {
