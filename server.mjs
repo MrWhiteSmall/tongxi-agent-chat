@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { attachments, imageMime, maxFileBytes } from './adapters/attachments.mjs';
+import { bailianCommand, bailianEnabled, bailianUsesImages, runBailian } from './adapters/bailian.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acceptsImages, directory, runAgent } from './adapters/index.mjs';
 
@@ -52,13 +53,13 @@ function eligible(room, ids) {
   return [...new Set(ids)].filter(id => directory.has(id) && (room.kind !== 'team' || room.agents.includes(id)));
 }
 
-function taskFor(room, agent, message, context, files) {
-  const task = { id: randomUUID(), room: room.id, agent, source: message.id, status: 'queued', parent: null, created: Date.now() };
+function taskFor(room, agent, message, context, files, command) {
+  const task = { id: randomUUID(), room: room.id, agent, source: message.id, status: 'queued', parent: null, created: Date.now(), ...(command ? { capability: 'bailian-' + command.kind } : {}) };
   state.tasks[task.id] = task;
   if (room.kind !== 'team' && !room.agents.includes(agent)) {
     roomMessage(room, agent, 'event', '临时加入', { task: task.id });
   }
-  queueMicrotask(() => execute(task, context, files));
+  queueMicrotask(() => execute(task, context, files, undefined, command));
   return task;
 }
 
@@ -130,21 +131,21 @@ async function imageInputs(files, signal, readBytes) {
   return result;
 }
 
-async function execute(task, context, files, existingImages) {
+async function execute(task, context, files, existingImages, command) {
   if (task.status !== 'queued') return;
   const room = state.rooms[task.room];
   const agent = directory.get(task.agent);
   const controller = new AbortController();
   active.set(task.id, controller);
-  const timeout = setTimeout(() => controller.abort(), 240_000);
+  const timeout = setTimeout(() => controller.abort(), command?.kind === 'video' ? 480_000 : 240_000);
   task.status = 'running';
   save();
   try {
-    const images = existingImages || await imageInputs(files, controller.signal, acceptsImages(agent) ||
+    const images = existingImages || await imageInputs(files, controller.signal, bailianUsesImages(command) || (!command && acceptsImages(agent)) ||
       (!task.parent && room.kind === 'team' && room.agents.some(id => acceptsImages(directory.get(id) || {}))));
     let material = context;
     if (images.some(image => image.url)) material += '\n可用图片已随请求提供：' + images.filter(image => image.url).map(image => image.name).join('、');
-    if (!task.parent && room.kind === 'team') {
+    if (!command && !task.parent && room.kind === 'team') {
       const choices = eligible(room, room.agents).filter(id => id !== agent.id);
       if (choices.length) {
         const plan = await runAgent(agent, '你是团队负责人。规划 JSON，只返回 {"agents":["id"]}。简单聊天返回空数组。复杂任务最多选两个相关成员。候选：' + JSON.stringify(catalog.filter(a => choices.includes(a.id))), context, controller.signal);
@@ -164,7 +165,10 @@ async function execute(task, context, files, existingImages) {
       }
     }
     controller.signal.throwIfAborted();
-    const result = await runAgent(agent, '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules, material, controller.signal, images);
+    const result = command ? await runBailian(command, images, controller.signal, progress => {
+      task.progress = progress;
+      save();
+    }) : await runAgent(agent, '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules, material, controller.signal, images);
     controller.signal.throwIfAborted();
     task.result = result;
     task.status = 'done';
@@ -341,7 +345,7 @@ createServer(async (req, res) => {
     const user = session.name;
     if (req.method === 'GET' && path === '/api/state') {
       const rooms = Object.values(state.rooms).filter(room => room.users.includes(user));
-      return json({ user, catalog, people: Object.keys(accounts).filter(name => name !== user), rooms: rooms.map(({ messages, ...room }) => {
+      return json({ user, catalog, bailian: bailianEnabled, people: Object.keys(accounts).filter(name => name !== user), rooms: rooms.map(({ messages, ...room }) => {
         const latest = messages.findLast(message => message.kind !== 'event');
         return { ...room, last: latest?.text.slice(0, 60) || latest?.attachment?.name, lastAt: latest?.at, lastSender: latest?.sender };
       }) });
@@ -445,7 +449,12 @@ createServer(async (req, res) => {
         attachment = { id: randomUUID(), name, data: encoded };
       }
       const ids = eligible(room, Array.isArray(input.agents) ? input.agents : []);
+      const command = bailianCommand(content, ids.length > 0 || room.kind === 'team');
+      if (command && !bailianEnabled) fail(503, '百炼 API Key 未配置');
       if (room.kind === 'team' && !ids.length && room.lead && directory.has(room.lead)) ids.push(room.lead);
+      if (command && !ids.length && directory.has('qwen')) ids.push('qwen');
+      if (command && ids.length > 1) fail(400, '一次百炼任务请选择一个 Agent');
+      if (command?.kind === 'video' && Object.values(state.tasks).some(task => task.capability === 'bailian-video' && ['queued', 'running'].includes(task.status))) fail(429, '已有百炼视频正在生成，请稍后再试');
       if (ids.length && runningTaskCount(room) + ids.length > 3) fail(429, '当前会话最多同时运行三个任务');
       const pending = Object.values(state.tasks).filter(task => !task.parent && ['queued', 'running'].includes(task.status)).length;
       if (ids.length && pending + ids.length > 8) fail(429, 'Agent 正忙，请稍后重试');
@@ -482,7 +491,7 @@ createServer(async (req, res) => {
       }
       const files = [message, ...history.slice().reverse()].map(item => item.attachment && state.files?.[item.attachment.id]).filter(Boolean);
       if (files.length) context += '\n用户允许共享的附件名称：' + files.map(file => file.name).join('、') + '。只分析实际收到的文件内容。';
-      for (const id of ids) taskFor(room, id, message, context, files);
+      for (const id of ids) taskFor(room, id, message, context, files, command);
       save();
       return json({ id: message.id }, 201);
     }

@@ -121,6 +121,7 @@ async function refresh() {
     $('login').hidden = true;
     $('workspace').hidden = false;
     $('identity').textContent = app.user;
+    $('input').placeholder = app.bailian ? '输入消息，@ Agent 或 /百炼' : '输入消息，按 @ 邀请 Agent';
     const snapshot = JSON.stringify(app.rooms);
     if (snapshot !== lastRooms) {
       lastRooms = snapshot;
@@ -282,6 +283,7 @@ function renderTasks() {
     item.dataset.id = task.id;
     item.open = expanded.has(task.id);
     item.append(el('summary', nameOf(task.agent) + ' · ' + taskStatus[task.status]));
+    if (isActive(task) && task.progress) item.append(el('p', task.progress, 'muted'));
     if (task.error) item.append(el('p', task.error, 'muted'));
     for (const child of room.tasks.filter(child => child.parent === task.id)) {
       item.append(el('p', nameOf(child.agent) + ' · ' + taskStatus[child.status] + (child.preview ? '：' + child.preview : '')));
@@ -295,9 +297,10 @@ function renderTasks() {
 }
 
 function listedAgents(conversation = null) {
+  const base = app.bailian ? [...mentionNames, { ids: ['qwen'], name: 'Qwen', alias: 'qwen' }] : mentionNames;
   const definitions = app.catalog.some(agent => agent.id === 'offline')
-    ? [...mentionNames, { ids: ['offline'], name: '离线示例', alias: '' }]
-    : mentionNames;
+    ? [...base, { ids: ['offline'], name: '离线示例', alias: '' }]
+    : base;
   return definitions.map(choice => {
     const available = choice.ids.filter(id => app.catalog.some(agent => agent.id === id));
     const memberId = available.find(id => conversation?.agents.includes(id));
