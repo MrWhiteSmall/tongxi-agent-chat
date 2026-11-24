@@ -17,6 +17,19 @@ let app;
 let room;
 let roomId;
 let selected = [];
+let replyDraft = null;
+function speakerName(message) {
+  return message.kind === 'human' ? message.sender : nameOf(message.sender);
+}
+
+function setReplyDraft(message = null) {
+  replyDraft = message;
+  $('replyDraft').hidden = !message;
+  $('replyText').textContent = message
+    ? '回复 ' + speakerName(message) + '：' + (message.text || message.attachment?.name || '').slice(0, 100)
+    : '';
+}
+
 let draftFile = null;
 function setDraftFile(file = null) {
   if (file && (!file.size || file.size >= 10_000_000)) {
@@ -179,6 +192,7 @@ async function openRoom(id) {
   lastFeed = lastTasks = '';
   $('input').value = '';
   setDraftFile();
+  setReplyDraft();
   $('mentionList').hidden = true;
   $('workspace').classList.add('has-room');
   await refresh();
@@ -204,7 +218,7 @@ function renderRoom() {
       const details = el('div', undefined, 'message-content');
       details.append(el('div', (message.kind === 'human' ? message.sender : nameOf(message.sender)) + (message.kind === 'agent' ? ' · Agent' : ''), 'sender'));
       const source = room.messages.find(item => item.id === message.reply);
-      if (source) details.append(el('blockquote', source.text.slice(0, 100)));
+      if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.text || source.attachment?.name || '').slice(0, 100)));
       details.append(el('div', message.text, 'bubble'));
       if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
       if (message.attachment) details.append(button('下载 ' + message.attachment.name, async () => {
@@ -217,6 +231,12 @@ function renderRoom() {
         } catch (error) { toast(error.message); }
       }));
       if (message.artifact) details.append(button('打开预览', () => showArtifact(message.task)));
+      const reply = button('回复', () => {
+        setReplyDraft(message);
+        $('input').focus();
+      }, 'reply-action');
+      reply.setAttribute('aria-label', '回复 ' + speakerName(message) + ' 的消息');
+      details.append(reply);
       row.append(details);
       return [...timestamp, row];
     }));
@@ -410,7 +430,8 @@ $('composer').onsubmit = async event => {
   try {
     const sourceRoom = roomId;
     const localFile = draftFile;
-    const message = { text, agents: recipients, scope: $('scope').value, messageIds: contextIds };
+    const quoted = replyDraft;
+    const message = { text, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id };
     let payload = message;
     if (localFile) {
       if (localFile.size >= 10_000_000 || localFile.size === 0) throw new Error('请选择小于 10 MB 的非空文件');
@@ -423,6 +444,7 @@ $('composer').onsubmit = async event => {
     if ($('input').value === draft) $('input').value = '';
     selected = [];
     if (draftFile === localFile) setDraftFile();
+    if (replyDraft === quoted) setReplyDraft();
     $('mentionList').hidden = true;
     await refresh();
   } catch (error) { toast(error.message); }
@@ -511,6 +533,7 @@ $('historyForm').onsubmit = event => {
 };
 
 $('fileInput').onchange = () => setDraftFile($('fileInput').files[0]);
+$('clearReply').onclick = () => setReplyDraft();
 $('clearFile').onclick = () => setDraftFile();
 $('input').addEventListener('paste', event => {
   const clipboard = event.clipboardData;

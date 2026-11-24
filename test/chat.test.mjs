@@ -79,6 +79,13 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   assert.ok(snapshot.messages.some(message => message.text === '离开了会话'));
   assert.ok(snapshot.messages.some(message => message.reply === question));
 
+  const earlierAnswer = snapshot.messages.find(message => message.reply === question);
+  const { id: reply } = await request('A', 'rooms/' + dm + '/messages', { text: '请评价这条；', agents: ['test-helper'], scope: 'message', replyTo: earlierAnswer.id }, 201);
+  const { snapshot: quotedSnapshot } = await settled(dm, reply);
+  const replyMessage = quotedSnapshot.messages.find(message => message.id === reply);
+  assert.equal(replyMessage.reply, earlierAnswer.id);
+  assert.deepEqual(replyMessage.shared, [earlierAnswer.id]);
+
   const { id: team } = await request('A', 'rooms', { kind: 'team', name: '团队' }, 201);
   await request('B', 'rooms/' + team, undefined, 404);
   assert.deepEqual((await request('A', 'rooms/' + team)).agents, ['test', 'test-helper']);
