@@ -33,6 +33,7 @@ let app;
 let room;
 let roomId;
 let selected = [];
+let mentionedPeople = new Set();
 let replyDraft = null;
 function speakerName(message) {
   return message.kind === 'human' ? message.sender : nameOf(message.sender);
@@ -204,6 +205,8 @@ async function openRoom(id) {
   $('empty').hidden = false;
   room = null;
   selected = [];
+  mentionedPeople.clear();
+  if ($('messageActions').open) $('messageActions').close();
   contextIds = [];
   $('scope').value = 'message';
   lastFeed = lastTasks = '';
@@ -213,6 +216,110 @@ async function openRoom(id) {
   $('mentionList').hidden = true;
   $('workspace').classList.add('has-room');
   await refresh();
+}
+
+function mentionSpeaker(message) {
+  const input = $('input');
+  if (message.kind === 'agent') {
+    if (!app.catalog.some(agent => agent.id === message.sender) ||
+        (room.kind === 'team' && !room.agents.includes(message.sender))) {
+      toast(speakerName(message) + ' 当前不可用');
+      return;
+    }
+    if (!selected.includes(message.sender)) selected.push(message.sender);
+    renderSelection();
+  } else {
+    const name = message.sender;
+    const start = input.selectionStart;
+    const needsSpace = start > 0 && !/\s/.test(input.value[start - 1]);
+    const value = (needsSpace ? ' ' : '') + '@' + name + ' ';
+    input.setRangeText(value, start, input.selectionEnd, 'end');
+    mentionedPeople.add(name);
+  }
+  $('mentionList').hidden = true;
+  input.focus();
+}
+
+function quoteMessage(message) {
+  setReplyDraft(message);
+  $('input').focus();
+}
+
+async function copyMessage(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const fallback = el('textarea', text, 'clipboard-fallback');
+    $('messageActions').append(fallback);
+    fallback.select();
+    const copied = document.execCommand('copy');
+    fallback.remove();
+    if (!copied) throw new Error('复制失败');
+  }
+}
+
+function showMessageActions(message) {
+  const dialog = $('messageActions');
+  if (!room || dialog.open || document.querySelector('dialog[open]') ||
+      !room.messages.some(item => item.id === message.id && !item.recalled)) return;
+  const sourceRoom = roomId;
+  const actions = [];
+  if (message.text) actions.push(button('复制', async () => {
+    try {
+      await copyMessage(message.text);
+      dialog.close();
+      toast('已复制');
+    } catch { dialog.close(); toast('复制失败'); }
+  }, 'message-action'));
+  actions.push(button('引用', () => {
+    dialog.close();
+    quoteMessage(message);
+  }, 'message-action'));
+  if (message.kind === 'human' && message.sender === app.user) {
+    actions.push(button('撤回', async () => {
+      try {
+        await api('rooms/' + sourceRoom + '/recall', { message: message.id });
+        if (replyDraft?.id === message.id) setReplyDraft();
+        if (dialog.open) dialog.close();
+        await refresh();
+      } catch (error) { toast(error.message); }
+    }, 'message-action danger'));
+  }
+  $('messageActionList').replaceChildren(...actions);
+  dialog.showModal();
+}
+
+function bindMessageActions(element, message) {
+  let press;
+  function clear() {
+    if (press) clearTimeout(press.timer);
+    press = null;
+  }
+  element.tabIndex = 0;
+  element.addEventListener('contextmenu', event => {
+    if (event.target.closest('a, button')) return;
+    event.preventDefault();
+    clear();
+    showMessageActions(message);
+  });
+  element.addEventListener('keydown', event => {
+    if (event.target === element && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+      event.preventDefault();
+      showMessageActions(message);
+    }
+  });
+  element.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'mouse' || !event.isPrimary || event.target.closest('a, button')) return;
+    clear();
+    const { clientX: x, clientY: y } = event;
+    press = { x, y, timer: setTimeout(() => {
+      if (element.isConnected) showMessageActions(message);
+      clear();
+    }, 500) };
+  });
+  element.addEventListener('pointermove', event => {
+    if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 12) clear();
+  });
+  for (const event of ['pointerup', 'pointercancel', 'pointerleave']) element.addEventListener(event, clear);
 }
 
 function renderRoom() {
@@ -229,13 +336,19 @@ function renderRoom() {
       const preceding = room.messages[index - 1];
       const timestamp = !preceding || message.at - preceding.at > 5 * 60_000 ? [el('div', clock.format(message.at), 'timestamp')] : [];
       if (message.kind === 'event') return [...timestamp, el('div', nameOf(message.sender) + ' ' + message.text, 'system-message')];
+      if (message.recalled) {
+        const who = message.sender === app.user ? '你' : message.sender;
+        return [...timestamp, el('div', who + '撤回了一条消息', 'system-message')];
+      }
       const mine = message.kind === 'human' && message.sender === app.user;
       const row = el('article', undefined, 'message' + (mine ? ' mine' : ''));
-      row.append(el('span', message.kind === 'agent' ? 'AI' : message.sender.slice(0, 1), 'avatar'));
+      const avatar = button(message.kind === 'agent' ? 'AI' : message.sender.slice(0, 1), () => mentionSpeaker(message), 'avatar message-avatar');
+      avatar.setAttribute('aria-label', '@' + speakerName(message));
+      row.append(avatar);
       const details = el('div', undefined, 'message-content');
       details.append(el('div', (message.kind === 'human' ? message.sender : nameOf(message.sender)) + (message.kind === 'agent' ? ' · Agent' : ''), 'sender'));
       const source = room.messages.find(item => item.id === message.reply);
-      if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.text || source.attachment?.name || '').slice(0, 100)));
+      if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.recalled ? '消息已撤回' : (source.text || source.attachment?.name || '').slice(0, 100))));
       if (message.text) {
         const bubble = el('div', undefined, 'bubble');
         bubble.innerHTML = markdown.render(message.text);
@@ -252,10 +365,8 @@ function renderRoom() {
         } catch (error) { toast(error.message); }
       }));
       if (message.artifact) details.append(button('打开预览', () => showArtifact(message.task)));
-      const reply = button('回复', () => {
-        setReplyDraft(message);
-        $('input').focus();
-      }, 'reply-action');
+      const reply = button('回复', () => quoteMessage(message), 'reply-action');
+      bindMessageActions(details, message);
       reply.setAttribute('aria-label', '回复 ' + speakerName(message) + ' 的消息');
       details.append(reply);
       row.append(details);
@@ -454,7 +565,8 @@ $('composer').onsubmit = async event => {
     const sourceRoom = roomId;
     const localFile = draftFile;
     const quoted = replyDraft;
-    const message = { text, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id };
+    const people = [...mentionedPeople].filter(name => text.includes('@' + name + ' '));
+    const message = { text, mentions: people, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id };
     let payload = message;
     if (localFile) {
       if (localFile.size >= 10_000_000 || localFile.size === 0) throw new Error('请选择小于 10 MB 的非空文件');
@@ -466,6 +578,7 @@ $('composer').onsubmit = async event => {
     if (roomId !== sourceRoom) return;
     if ($('input').value === draft) $('input').value = '';
     selected = [];
+    mentionedPeople.clear();
     if (draftFile === localFile) setDraftFile();
     if (replyDraft === quoted) setReplyDraft();
     $('mentionList').hidden = true;
@@ -535,7 +648,7 @@ setInterval(refresh, 1000);
 
 $('scope').onchange = () => {
   if ($('scope').value !== 'selected') return;
-  $('historyList').replaceChildren(...room.messages.filter(message => message.kind !== 'event').slice(-30).reverse().map(message => {
+  $('historyList').replaceChildren(...room.messages.filter(message => message.kind !== 'event' && !message.recalled).slice(-30).reverse().map(message => {
     const label = el('label', undefined, 'person');
     const input = el('input');
     input.type = 'checkbox';
@@ -583,7 +696,7 @@ $('forwardButton').onclick = () => {
     option.value = team.id;
     return option;
   }));
-  $('forwardList').replaceChildren(...room.messages.filter(message => message.kind !== 'event').slice(-30).reverse().map(message => {
+  $('forwardList').replaceChildren(...room.messages.filter(message => message.kind !== 'event' && !message.recalled).slice(-30).reverse().map(message => {
     const label = el('label', undefined, 'person');
     const check = el('input');
     check.type = 'checkbox';

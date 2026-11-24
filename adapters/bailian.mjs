@@ -19,14 +19,20 @@ export function bailianCommand(text, allowNatural = false) {
     const model = rest.match(/^([\w./-]{1,120})\s+([\s\S]+)$/);
     return { kind, model: model?.[1], prompt: model?.[2] || '' };
   }
-  if (!allowNatural || !bailianEnabled) return;
-  if (/联网(?:搜索|查|核实)?|上网(?:搜|查)|(?:web|internet)\s+search|^(?:(?:请|帮我|给我)\s*)*(?:查一下|查找|查证|搜索|搜一下|检索|核实)/i.test(prompt)) {
-    return { kind: 'search', prompt, automatic: true };
+  const manual = prompt.match(/^\/(?:百炼|bailian)(?:\s+([\s\S]+))?$/i);
+  if ((!allowNatural && !manual) || !bailianEnabled) return;
+  const requestText = manual ? manual[1]?.trim() || '' : prompt;
+  if (/^\/(?:百炼|bailian)(?:\s|$)/i.test(requestText)) return;
+  if (/联网(?:搜索|查|核实)?|上网(?:搜|查)|(?:web|internet)\s+search|^(?:(?:请|帮我|给我)\s*)*(?:查一下|查找|查证|搜索|搜一下|检索|核实)/i.test(requestText)) {
+    return { kind: 'search', prompt: requestText, automatic: true };
   }
-  const natural = prompt.match(/^(?:(?:请|帮我|给我)\s*)*(?:用百炼\s*)?(?:生成|制作|画)(?:一[张幅段个条]|个)?[^\n，。！？：:]{0,16}?(图片|图像|海报|插画|视频|短片|图)/);
-  if (natural) return { kind: ['视频','短片'].includes(natural[1]) ? 'video' : 'image', prompt, automatic: true };
-  if (/^(?:(?:请|帮我)\s*)*(?:用百炼\s*)?(?:编辑|修改|调整|改一下)(?:这[张个幅])?(?:图片|图像|照片|图)/.test(prompt)) {
-    return { kind: 'edit', prompt, automatic: true };
+  const natural = requestText.match(/^(?:(?:请|帮我|给我)\s*)*(?:用百炼\s*)?(?:生成|制作|画)(?:一[张幅段个条]|个)?[^\n，。！？：:]{0,16}?(图片|图像|海报|插画|视频|短片|图)/);
+  if (natural) return { kind: ['视频','短片'].includes(natural[1]) ? 'video' : 'image', prompt: requestText, automatic: true };
+  if (/^(?:(?:请|帮我)\s*)*(?:用百炼\s*)?(?:编辑|修改|调整|改一下)(?:这[张个幅])?(?:图片|图像|照片|图)/.test(requestText)) {
+    return { kind: 'edit', prompt: requestText, automatic: true };
+  }
+  if (manual || /^(?:(?:请|帮我|给我)\s*)*(?:用百炼\s*)?(?:生成|画|制作|绘制|编辑|改)/.test(requestText)) {
+    return { kind: 'intent', prompt: requestText, automatic: true };
   }
 }
 

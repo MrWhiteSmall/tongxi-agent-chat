@@ -103,6 +103,7 @@ async function imageInputs(files, signal, readBytes) {
   const result = [];
   let remaining = maxFileBytes;
   for (const file of files) {
+    if (file.revoked) continue;
     const imageName = /\.(png|jpe?g|gif|webp)$/i.test(file.name);
     if (!file.imageMime && !imageName) continue;
     if (!readBytes) { result.push({ name: file.name }); continue; }
@@ -137,15 +138,46 @@ async function execute(task, context, files, existingImages, command) {
   const agent = directory.get(task.agent);
   const controller = new AbortController();
   active.set(task.id, controller);
-  const timeout = setTimeout(() => controller.abort(), command?.kind === 'video' ? 480_000 : 240_000);
+  const timeout = setTimeout(() => controller.abort(), ['video', 'intent'].includes(command?.kind) ? 480_000 : 240_000);
   task.status = 'running';
   save();
   try {
-    const images = existingImages || await imageInputs(files, controller.signal, bailianUsesImages(command) || (!command && acceptsImages(agent)) ||
+    let images = existingImages || await imageInputs(files, controller.signal, bailianUsesImages(command) || (!command && acceptsImages(agent)) ||
       (!task.parent && room.kind === 'team' && room.agents.some(id => acceptsImages(directory.get(id) || {}))));
+    const system = '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules;
+    const status = progress => { task.progress = progress; save(); };
+    let action = command;
+    if (action?.automatic) {
+      const allowed = action.kind === 'intent' ? ['image', 'edit', 'video', 'search'] : [action.kind];
+      const choice = await runAgent(agent, '只返回 JSON {"tool":"工具名或 none","query":"执行所需的提示词"}。可用工具：' + allowed.join('、') + '。' +
+        'image 生图，包括用户要求生成没有指定格式的实体或场景，例如“生成一只杜宾犬”；edit 编辑用户的原图；video 生成视频；search 联网查证。' +
+        '用户明确要代码、网页、游戏、文档、文字或讨论如何做时返回 none。用户要看图片时不得把需求改写成生成代码。' +
+        '保留用户约束；搜索词不得携带与查询无关的私人信息。',
+      action.prompt, controller.signal);
+      const original = action;
+      let resolved = false;
+      try {
+        const parsed = JSON.parse(choice.trim().replace(/^```(?:json)?\s*|\s*```$/gi, ''));
+        if (parsed.tool === 'none') { action = null; resolved = true; }
+        else if (allowed.includes(parsed.tool) && typeof parsed.query === 'string' && parsed.query.trim()) {
+          action = { ...action, kind: parsed.tool, prompt: parsed.query.trim().slice(0, 6000) };
+          resolved = true;
+        }
+      } catch {}
+      if (original.kind === 'intent' && !resolved) throw new Error('无法确认要用的工具，请写明生图、视频、改图或联网搜索');
+      if (action?.kind === 'edit' && original.kind === 'intent') images = await imageInputs(files, controller.signal, true);
+      if (action?.kind === 'video' && Object.values(state.tasks).some(item => item.id !== task.id &&
+          item.capability === 'bailian-video' && ['queued', 'running'].includes(item.status))) {
+        throw new Error('已有百炼视频正在生成，请稍后再试');
+      }
+      if (!action && original.kind === 'intent' && acceptsImages(agent)) images = await imageInputs(files, controller.signal, true);
+      if (action) task.capability = 'bailian-' + action.kind;
+      else delete task.capability;
+      save();
+    }
     let material = context;
     if (images.some(image => image.url)) material += '\n可用图片已随请求提供：' + images.filter(image => image.url).map(image => image.name).join('、');
-    if (!command && !task.parent && room.kind === 'team') {
+    if (!action && !task.parent && room.kind === 'team') {
       const choices = eligible(room, room.agents).filter(id => id !== agent.id);
       if (choices.length) {
         const plan = await runAgent(agent, '你是团队负责人。规划 JSON，只返回 {"agents":["id"]}。简单聊天返回空数组。复杂任务最多选两个相关成员。候选：' + JSON.stringify(catalog.filter(a => choices.includes(a.id))), context, controller.signal);
@@ -165,22 +197,6 @@ async function execute(task, context, files, existingImages, command) {
       }
     }
     controller.signal.throwIfAborted();
-    const system = '你是 ' + agent.name + '，职责：' + agent.role + '。' + answerRules;
-    const status = progress => { task.progress = progress; save(); };
-    let action = command;
-    if (action?.automatic) {
-      const choice = await runAgent(agent, '你是工具调用助手。只返回 JSON {"tool":"search|image|edit|video 或 none","query":"执行所需的提示词"}。' +
-        '本次唯一可选工具：' + action.kind + '。用户清楚要求该操作就选择它。例如请求查证、联网、最新事实时选择 search。' +
-        '请求只是讨论如何做时选择 none。保留用户明确的要求。搜索词不得携带与查询无关的私人信息。',
-      action.prompt, controller.signal);
-      try {
-        const parsed = JSON.parse(choice.trim().replace(/^```(?:json)?\s*|\s*```$/gi, ''));
-        if (parsed.tool === 'none') action = null;
-        else if (parsed.tool === action.kind && typeof parsed.query === 'string' && parsed.query.trim()) {
-          action = { ...action, prompt: parsed.query.trim().slice(0, 6000) };
-        }
-      } catch {}
-    }
     let result;
     if (action?.kind === 'search' && action.automatic) {
       status('正在使用百炼联网搜索。');
@@ -373,7 +389,7 @@ createServer(async (req, res) => {
       const rooms = Object.values(state.rooms).filter(room => room.users.includes(user));
       return json({ user, catalog, bailian: bailianEnabled, people: Object.keys(accounts).filter(name => name !== user), rooms: rooms.map(({ messages, ...room }) => {
         const latest = messages.findLast(message => message.kind !== 'event');
-        return { ...room, last: latest?.text.slice(0, 60) || latest?.attachment?.name, lastAt: latest?.at, lastSender: latest?.sender };
+        return { ...room, last: latest?.recalled ? '撤回了一条消息' : latest?.text.slice(0, 60) || latest?.attachment?.name, lastAt: latest?.at, lastSender: latest?.sender };
       }) });
     }
     if (req.method === 'POST' && path === '/api/rooms') {
@@ -392,7 +408,7 @@ createServer(async (req, res) => {
       save();
       return json({ id: room.id }, 201);
     }
-    const match = path.match(/^\/api\/rooms\/([a-f0-9-]+)(?:\/(messages|members|cancel|artifact|share|attachment|forward))?$/);
+    const match = path.match(/^\/api\/rooms\/([a-f0-9-]+)(?:\/(messages|members|cancel|artifact|share|attachment|forward|recall))?$/);
     const room = match && state.rooms[match[1]];
     if (!room || !room.users.includes(user)) fail(404, '会话不存在');
     const action = match[2];
@@ -405,12 +421,12 @@ createServer(async (req, res) => {
       if (!task?.html || task.room !== room.id) fail(404, '产物不存在');
       for (const [key, preview] of previews) if (preview.expires < Date.now()) previews.delete(key);
       const key = randomUUID();
-      previews.set(key, { html: task.html, expires: Date.now() + 300_000 });
+      previews.set(key, { task: task.id, html: task.html, expires: Date.now() + 300_000 });
       return json({ html: task.html, url: '/preview/' + key });
     }
     if (action === 'attachment' && req.method === 'GET') {
       const file = state.files?.[url.searchParams.get('id')];
-      if (!file || file.room !== room.id) fail(404, '文件不存在');
+      if (!file || file.room !== room.id || file.revoked) fail(404, '文件不存在');
       if (!file.storage && url.searchParams.get('download') !== '1') return json({ name: file.name, data: file.data });
       if (file.storage && file.storage !== storage.kind) fail(503, '附件存储暂不可用');
       const source = file.storage ? await storage.get(file.id) : Readable.from([Buffer.from(file.data, 'base64')]);
@@ -432,11 +448,32 @@ createServer(async (req, res) => {
       input = await body(req, action === 'messages' && storage.kind === 'disk' ? 1_600_000 : undefined);
     }
     if (cleaning) fail(503, '正在进行每日清理，请稍后重试');
+    if (action === 'recall') {
+      const index = room.messages.findIndex(message => message.id === plain(input.message, 80));
+      if (index < 0) fail(404, '消息不存在');
+      const message = room.messages[index];
+      if (message.kind !== 'human' || message.sender !== user) fail(403, '只能撤回自己发送的消息');
+      if (!message.recalled) {
+        const file = message.attachment && state.files?.[message.attachment.id];
+        if (file) {
+          file.revoked = true;
+          if (file.data) delete file.data;
+        }
+        if (message.artifact && state.tasks[message.task]?.room === room.id) {
+          delete state.tasks[message.task];
+          for (const [key, preview] of previews) if (preview.task === message.task) previews.delete(key);
+        }
+        for (const task of Object.values(state.tasks)) if (task.room === room.id && task.source === message.id) cancel(task);
+        room.messages[index] = { id: message.id, sender: user, kind: 'human', text: '', at: message.at, recalled: Date.now() };
+        save();
+      }
+      return json({ ok: true });
+    }
     if (action === 'forward') {
       const target = state.rooms[plain(input.target, 80)];
       if (!target?.users.includes(user) || target.kind !== 'team') fail(404, '目标团队不存在');
       const ids = new Set(Array.isArray(input.ids) ? input.ids.slice(0, 12) : []);
-      const quoted = room.messages.filter(message => ids.has(message.id) && message.kind !== 'event');
+      const quoted = room.messages.filter(message => ids.has(message.id) && message.kind !== 'event' && !message.recalled);
       if (!quoted.length) fail(400, '请选择消息');
       const text = quoted.map(message => (message.kind === 'human' ? message.sender : directory.get(message.sender)?.name || message.sender) + '：' + message.text).join('\n').slice(0, 24_000);
       roomMessage(target, user, 'human', '转发的消息\n' + text);
@@ -457,7 +494,7 @@ createServer(async (req, res) => {
       const content = plain(input.text, 6000);
       if (!content && !input.file && !upload) fail(400, '请输入消息');
       const replyId = plain(input.replyTo, 80);
-      const quoted = replyId && room.messages.find(item => item.id === replyId && item.kind !== 'event');
+      const quoted = replyId && room.messages.find(item => item.id === replyId && item.kind !== 'event' && !item.recalled);
       if (replyId && !quoted) fail(404, '引用消息已不存在');
       let attachment;
       let fileBytes;
@@ -500,13 +537,15 @@ createServer(async (req, res) => {
         state.files ||= {};
         state.files[attachment.id] = { ...attachment, room: room.id };
       }
+      if (quoted && !room.messages.includes(quoted)) fail(404, '引用消息已不存在');
       const scope = ['recent', 'selected'].includes(input.scope) ? input.scope : 'message';
-      const readable = room.messages.filter(m => m.kind !== 'event');
+      const readable = room.messages.filter(m => m.kind !== 'event' && !m.recalled);
       const chosen = new Set(Array.isArray(input.messageIds) ? input.messageIds.slice(0, 12) : []);
       const history = scope === 'recent' ? readable.slice(-12) : scope === 'selected' ? readable.filter(m => chosen.has(m.id)) : [];
       if (quoted && !history.some(item => item.id === quoted.id)) history.push(quoted);
       const message = roomMessage(room, user, 'human', content, {
         agents: ids,
+        ...(Array.isArray(input.mentions) ? { mentions: [...new Set(input.mentions.filter(name => room.users.includes(name) && name !== user))] } : {}),
         ...(quoted ? { reply: quoted.id } : {}),
         ...(attachment ? { attachment: { id: attachment.id, name: attachment.name } } : {}),
         ...(ids.length ? { scope, shared: history.map(item => item.id) } : {})

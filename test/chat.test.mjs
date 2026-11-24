@@ -115,6 +115,17 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   assert.equal((await settled(team, interrupted)).task.status, 'failed');
   assert.equal((await request('A', 'rooms/' + team)).messages[0].text, '转发的消息\nB：游戏点子');
 
+  await request('B', 'rooms/' + dm + '/recall', {message: question}, 403);
+  await request('A', 'rooms/' + dm + '/recall', {message: posted.id});
+  const recalled = (await request('B', 'rooms/' + dm)).messages.find(message => message.id === posted.id);
+  assert.ok(recalled.recalled);
+  assert.equal(recalled.text, '');
+  assert.equal(recalled.attachment, undefined);
+  assert.equal((await fetch(server.base + '/api/rooms/' + dm + '/attachment?download=1&id=' + posted.attachment.id, {headers:{Authorization:'Bearer ' + tokens.B}})).status, 404);
+  await request('B', 'rooms/' + dm + '/messages', {text:'引用已撤回消息',replyTo:posted.id}, 404);
+  const mention = await request('A', 'rooms/' + dm + '/messages', {text:'@B 来看看',mentions:['B','C']}, 201);
+  assert.deepEqual((await request('B', 'rooms/' + dm)).messages.find(message => message.id === mention.id).mentions, ['B']);
+
   const cleanupUrl = server.base + '/internal/daily-cleanup';
   assert.equal((await fetch(cleanupUrl, {method:'POST'})).status, 404);
   const cleanupHeaders = {Authorization:'Bearer test-cleanup-token'};
