@@ -1,14 +1,16 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { dshAgent } from './dsh-agent.mjs';
+import { modelAgent } from './model-agent.mjs';
 
 const local = process.env.CHAT_LOCAL !== '0';
 const deepseek = process.env.DEEPSEEK_API_KEY;
 const qwen = process.env.DASHSCOPE_API_KEY || process.env.QWEN_API_KEY;
 const model = process.env.DEEPSEEK_MODEL || 'deepseek-flash';
 const providers = {
-  deepseek: { key: deepseek, url: 'https://api.deepseek.com/chat/completions', model },
+  deepseek: { key: deepseek, url: process.env.DEEPSEEK_AGENT_MODEL_URL || 'https://api.deepseek.com/chat/completions', model, options: { thinking: { type: 'disabled' } } },
   qwen: { key: qwen, url: (process.env.QWEN_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '') + '/chat/completions', model: process.env.QWEN_MODEL || 'qwen4-max' }
 };
 
@@ -37,14 +39,13 @@ if (process.env.CHAT_TEST_AGENT === '1') agents.unshift(
 
 export const directory = new Map(agents.filter(a => a.test || a.offline || a.url || a.enabled || providers[a.provider]?.key).map(a => [a.id, a]));
 
-export async function cli(agent, prompt, signal) {
+export async function cli(agent, prompt, signal, toolsUrl) {
   const cwd = await mkdtemp(join(tmpdir(), 'agent-chat-'));
   try {
     const args = {
-      codex: ['-a', 'never', 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-o', join(cwd, 'answer.txt'), '-'],
+      codex: ['-a', 'never', 'exec', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '-s', 'read-only', '-o', join(cwd, 'answer.txt'), '-'],
       claude: ['-p', '--tools', '', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence'],
-      dsh: ['--profile', 'headless', '--permission-mode', 'read-only', '--approval-policy', 'never', '-'],
-      pi: ['-p', '--no-session', '--no-tools', '--no-extensions', '--no-mcp', '--model', process.env.PI_MODEL || '']
+      pi: ['-p', '--no-session', '--no-builtin-tools', '--no-extensions', '--model', process.env.PI_MODEL || '']
     }[agent.command];
     const worker = process.env.TONGXI_WORKER === '1';
     if (worker && agent.command === 'codex') {
@@ -54,6 +55,21 @@ export async function cli(agent, prompt, signal) {
         '-c', 'model_providers.deepseek.wire_api="responses"',
         '-c', 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"');
     }
+    if (toolsUrl) {
+      if (agent.command === 'codex') {
+        args.splice(-1, 0, '-c', 'mcp_servers.tongxi.url=' + JSON.stringify(toolsUrl),
+          '-c', 'mcp_servers.tongxi.tool_timeout_sec=890');
+      } else if (agent.command === 'claude') {
+        const config = join(cwd, 'tongxi-mcp.json');
+        await writeFile(config, JSON.stringify({ mcpServers: { tongxi: { type: 'http', url: toolsUrl } } }), { mode: 0o600 });
+        args.push('--mcp-config', config, '--allowedTools', 'mcp__tongxi__*');
+      } else if (agent.command === 'pi') {
+        const extension = join(cwd, 'tongxi.ts');
+        await writeFile(extension, 'export default function (pi) { pi.registerMcpServer("tongxi", ' +
+          JSON.stringify({ url: toolsUrl, exposure: 'direct', timeout: 890 }) + '); }', { mode: 0o600 });
+        args.push('-e', 'builtin:mcp', '-e', extension);
+      }
+    }
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/KEY|TOKEN|SECRET|PASSWORD/i.test(key) && !(
@@ -61,6 +77,8 @@ export async function cli(agent, prompt, signal) {
         ((['pi', 'dsh'].includes(agent.command) || (worker && agent.command === 'codex')) && /^(DEEPSEEK|DASHSCOPE|QWEN)_API_KEY$/.test(key))
       )) delete env[key];
     }
+    if (agent.command === 'claude') env.MCP_TOOL_TIMEOUT = '890000';
+    if (agent.command === 'dsh') return await dshAgent({ cwd, env, prompt, toolsUrl, signal });
     const output = await new Promise((resolve, reject) => {
       const child = spawn(agent.command, args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'ignore'] });
       let output = '';
@@ -83,13 +101,12 @@ export function acceptsImages(agent) {
   return agent.provider === 'deepseek' && /^(deepseek-flash|deepseek-v4-flash(?:-vision-exp)?)$/.test(model);
 }
 
-export async function runAgent(agent, system, input, signal, images = []) {
+export async function runAgent(agent, system, input, signal, images = [], tools) {
   const canReadImages = acceptsImages(agent);
   if (images.length && !canReadImages) {
     input += '\n所选图片没有传给这个运行时，它不支持当前图片输入。图片：' + images.map(image => image.name).join('、');
   }
   if (agent.offline) {
-    if (system.includes('规划 JSON')) return '{"agents":[]}';
     return '这是离线示例。已生成一个点击计数小游戏。\n```html\n<!doctype html><html lang="zh"><meta charset="utf-8"><title>点击挑战</title><style>body{font:24px system-ui;text-align:center;padding:3rem;color:#19392f}button{font:inherit;padding:1rem;border-radius:1rem;background:#d0efde}</style><h1>点击挑战</h1><p>在 5 秒内尽可能多点几次。</p><button id="hit">开始</button><p id="count">0</p><script>let n=0,running=false;hit.onclick=()=>{if(!running){running=true;n=0;hit.textContent="继续点";setTimeout(()=>{running=false;hit.textContent="再玩一次"},5000)}count.textContent=++n};</script></html>\n```';
   }
   if (agent.test) {
@@ -97,29 +114,28 @@ export async function runAgent(agent, system, input, signal, images = []) {
       const timer = setTimeout(resolve, 2500);
       signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
     });
-    if (system.includes('规划 JSON')) return '{"agents":["test-helper"]}';
+    if (agent.id === 'test' && input.includes('做一个游戏') && (await tools.list()).some(tool => tool.name === 'delegate')) {
+      await tools.call('delegate', { agent: 'test-helper', task: '协助游戏设计' });
+    }
     return '已回复。\n```html\n<!doctype html><html><button>试玩</button></html>\n```';
   }
-  if (agent.command && !agent.url) return cli(agent, system + '\n\n' + input, signal);
+  if (agent.command && !agent.url) return cli(agent, system + '\n\n' + input, signal, tools?.url);
   const provider = providers[agent.provider];
-  const key = provider?.key || process.env[agent.id.toUpperCase() + '_TOKEN'];
-  const options = provider ? {
-    model: provider.model,
-    max_tokens: 8192,
-    ...(agent.provider === 'deepseek' ? { thinking: { type: 'disabled' } } : {}),
-    messages: [{ role: 'system', content: system }, { role: 'user', content: canReadImages && images.length ? [
-      { type: 'text', text: input },
-      ...images.map(image => ({ type: 'image_url', image_url: { url: image.url } }))
-    ] : input }]
-  } : { system, input };
-  const response = await fetch(provider?.url || agent.url, {
-    method: 'POST', redirect: 'error', signal,
-    headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
-    body: JSON.stringify(options)
-  });
-  if (!response.ok) throw new Error('运行时请求失败（HTTP ' + response.status + '）');
-  const result = await response.json();
-  const answer = provider ? result.choices?.[0]?.message?.content : result.text;
+  let answer;
+  if (provider) {
+    answer = await modelAgent(provider, { system, input, signal, images: canReadImages ? images : [], canReadImages, tools });
+  } else {
+    const key = process.env[agent.id.toUpperCase() + '_TOKEN'];
+    const response = await fetch(agent.url, {
+      method: 'POST', redirect: 'error', signal,
+      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
+      body: JSON.stringify({ system, input, tools: tools ? { type: 'streamable-http', url: tools.url } : undefined })
+    });
+    if (!response.ok) throw new Error('运行时请求失败（HTTP ' + response.status + '）');
+    const result = await response.json();
+    if (result.error) throw new Error('Agent 运行时未完成任务');
+    answer = result.text;
+  }
   if (typeof answer !== 'string' || !answer.trim() || answer.length > 500_000) throw new Error('运行时返回内容无效');
   return answer.trim();
 }

@@ -27,7 +27,7 @@ npm ci --omit=dev
 node --env-file=/etc/tongxi.env server.mjs
 ```
 
-前面使用现有 HTTPS 反向代理或内网 VPN，把手机浏览器和桌面浏览器引向同一个地址。保持 Node 服务只监听 127.0.0.1，防火墙限制入口。用 systemd 或容器重启策略维持后台运行。账号限制为 1–5 个，每人用独立且至少 16 字符的随机登录码。SQLite 数据包含聊天正文和产物，关闭服务后备份数据目录，或使用 SQLite 在线备份功能。修改登录码后，如需令此前会话马上失效，轮换账号名或在停机时清理会话记录。
+前面使用现有 HTTPS 反向代理或内网 VPN，把手机浏览器和桌面浏览器引向同一个地址。保持 Node 服务只监听 127.0.0.1，防火墙限制入口。用 systemd 或容器重启策略维持后台运行。账号限制为 1–15 个，每人用独立且至少 16 字符的随机登录码。SQLite 数据包含聊天正文和产物，关闭服务后备份数据目录，或使用 SQLite 在线备份功能。修改登录码后，如需令此前会话马上失效，轮换账号名或在停机时清理会话记录。
 
 服务器模式不会启动 Codex、Claude、Dsh、Pi 的本机 CLI。内部用户共享团队的 DeepSeek/Qwen API 配额。远程框架端点仅由部署者在环境文件配置。
 
@@ -45,4 +45,4 @@ Qwen 模型 ID 与工作空间配置参考 [百炼兼容接口](https://help.ali
 
 内测实例每天北京时间 04:00 通过 `tongxi-cleanup.timer` 清空聊天消息、任务及其可运行产物，删除同席记录的 OSS 附件。账号、会话和成员设置保留。OSS 专用账号需额外拥有同一附件前缀的删除权限。清理过程暂时拒绝写请求，失败后定时重试，同日重试仅处理未删附件。内测请勿使用此实例长期存放需要保留的内容。
 
-可选编码 Agent 工作者运行在独立系统账号下，监听回环地址 4318。安装 Codex CLI、Claude Code 和 Pi CLI 到 `/opt/tongxi/agent-cli`，配置 `/etc/tongxi/agents.env` 中的 DeepSeek API 和工作者令牌，再启用 `tongxi-agent-worker.service`。主服务可通过 `CLAUDE_URL`、`CODEX_URL`、`PIAGENT_URL` 与对应的 `_TOKEN` 调用。工作者一次执行一个任务，当前提供文本与代码产物，远端模式禁用直接 shell 工具。实际游戏运行时可由独立服务提供 `OHMYGAME_URL`。
+可选编码 Agent 工作者运行在独立系统账号下，监听回环地址 4318。安装 Codex CLI、Claude Code 和 Pi CLI 到 `/opt/tongxi/agent-cli`，配置 `/etc/tongxi/agents.env` 中的 DeepSeek API 和工作者令牌，再启用 `tongxi-agent-worker.service`。主服务可通过 `CLAUDE_URL`、`CODEX_URL`、`PIAGENT_URL` 与对应的 `_TOKEN` 调用。工作者运行隔离的 Agent 会话，接收主服务创建的任务级 MCP 地址。工具服务绑定私有入口，公共反向代理拒绝访问 `/internal/`。模型所需凭据留在运行时，百炼媒体及检索凭据留在工具服务。实际游戏运行时可由独立服务提供 `OHMYGAME_URL`。

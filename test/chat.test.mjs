@@ -92,6 +92,14 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   assert.equal(replyMessage.reply, earlierAnswer.id);
   assert.deepEqual(replyMessage.shared, [earlierAnswer.id]);
 
+  const { id: contextual } = await request('A', 'rooms/' + dm + '/messages', {
+    text: '这个', agents: ['test'], replyTo: earlierAnswer.id,
+    quoteContextIds: [original, question, question, earlierAnswer.id, reply, 'different-room']
+  }, 201);
+  const { snapshot: contextSnapshot } = await settled(dm, contextual);
+  assert.deepEqual(contextSnapshot.messages.find(message => message.id === contextual).shared,
+    [original, question, earlierAnswer.id]);
+
   const { id: team } = await request('A', 'rooms', { kind: 'team', name: '团队' }, 201);
   await request('B', 'rooms/' + team, undefined, 404);
   assert.deepEqual((await request('A', 'rooms/' + team)).agents, ['test', 'test-helper']);
@@ -166,4 +174,35 @@ test('真人会话、任务、私有团队、附件、产物、重启恢复', as
   const next = await request('B', 'rooms/' + dm + '/messages', {text:'清理后的消息'}, 201);
   await fetch(cleanupUrl, {method:'POST',headers:cleanupHeaders});
   assert.equal((await request('A', 'rooms/' + dm)).messages[0].id, next.id);
+});
+
+test('remembered session survives restart and manual logout revokes it', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tongxi-session-'));
+  let server = await start(directory);
+  t.after(async () => {
+    if (server.child.exitCode === null) await new Promise(resolve => {
+      server.child.once('exit', resolve);
+      server.child.kill();
+    });
+    await rm(directory, { recursive: true, force: true });
+  });
+  const login = await fetch(server.base + '/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'A', code: 'a'.repeat(20) })
+  });
+  assert.equal(login.status, 200);
+  const setCookie = login.headers.get('set-cookie');
+  assert.match(setCookie, /HttpOnly; SameSite=Strict; Max-Age=[1-9]/);
+  const cookie = setCookie.split(';')[0];
+  const { token } = await login.json();
+  await new Promise(resolve => { server.child.once('exit', resolve); server.child.kill(); });
+  server = await start(directory);
+  const session = await fetch(server.base + '/api/session', { headers: { Cookie: cookie } });
+  assert.equal(session.status, 200);
+  assert.equal((await session.json()).token, token);
+  const logout = await fetch(server.base + '/api/logout', { method: 'POST', headers: { Cookie: cookie } });
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.get('set-cookie'), /Max-Age=0/);
+  assert.equal((await fetch(server.base + '/api/session', { headers: { Cookie: cookie } })).status, 401);
+  assert.equal((await fetch(server.base + '/api/state', { headers: { Authorization: 'Bearer ' + token } })).status, 401);
 });

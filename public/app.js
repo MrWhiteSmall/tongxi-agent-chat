@@ -35,12 +35,42 @@ let roomId;
 let selected = [];
 let mentionedPeople = new Set();
 let replyDraft = null;
+let quoteContext = [];
+let quoteContextIds = [];
+
+function quoteContextFor(message) {
+  if (!message || !room) return [];
+  const byId = new Map(room.messages.filter(item => item.kind !== 'event').map(item => [item.id, item]));
+  const position = room.messages.findIndex(item => item.id === message.id);
+  const prior = room.messages.slice(0, Math.max(0, position))
+    .filter(item => item.kind !== 'event' && !item.recalled).slice(-3);
+  const chain = [];
+  const seen = new Set([message.id]);
+  for (let id = message.reply, depth = 0; id && depth < 4 && !seen.has(id); depth++) {
+    const parent = byId.get(id);
+    if (!parent) break;
+    seen.add(id);
+    if (!parent.recalled) chain.push(parent);
+    id = parent.reply;
+  }
+  const ids = new Set([...prior, ...chain].map(item => item.id));
+  return room.messages.filter(item => ids.has(item.id));
+}
+
+function renderQuoteContextButton() {
+  const control = $('quoteContextButton');
+  control.hidden = !replyDraft;
+  control.textContent = '引用上下文 · ' + quoteContextIds.length;
+}
 function speakerName(message) {
   return message.kind === 'human' ? message.sender : nameOf(message.sender);
 }
 
 function setReplyDraft(message = null) {
   replyDraft = message;
+  quoteContext = quoteContextFor(message);
+  quoteContextIds = quoteContext.map(item => item.id);
+  renderQuoteContextButton();
   $('replyDraft').hidden = !message;
   $('replyText').textContent = message
     ? '回复 ' + speakerName(message) + '：' + (message.text || message.attachment?.name || '').slice(0, 100)
@@ -106,6 +136,11 @@ async function api(path, data) {
   const value = await response.json();
   if (!response.ok) throw Object.assign(new Error(value.error), { status: response.status });
   return value;
+}
+
+function useSession(value) {
+  token = value.token;
+  sessionStorage.setItem('token', token);
 }
 
 function showLogin() {
@@ -175,7 +210,50 @@ function renderRoomList() {
   if (!sorted.length) $('rooms').append(el('p', search ? '没有找到会话' : '暂无会话', 'list-empty'));
 }
 
+let currentTab = 'inbox';
+const dialogStack = [];
+
+function showDialog(dialog) {
+  dialog.showModal();
+  const index = dialogStack.indexOf(dialog);
+  if (index !== -1) dialogStack.splice(index, 1);
+  dialogStack.push(dialog);
+}
+
+function closeRoom() {
+  $('workspace').classList.remove('has-room');
+  if (mobile.matches) {
+    room = roomId = null;
+    renderRoomList();
+  }
+}
+
+window.tongxiBack = () => {
+  while (dialogStack.length) {
+    const dialog = dialogStack.pop();
+    if (!dialog.open) continue;
+    dialog.close();
+    if (dialog.id === 'historyDialog' && !contextIds.length) $('scope').value = 'message';
+    return true;
+  }
+  if (!$('mentionList').hidden) {
+    $('mentionList').hidden = true;
+    return true;
+  }
+  if ($('workspace').classList.contains('has-room')) {
+    closeRoom();
+    setTab('inbox');
+    return true;
+  }
+  if (!$('workspace').hidden && currentTab !== 'inbox') {
+    setTab('inbox');
+    return true;
+  }
+  return false;
+};
+
 function setTab(tab) {
+  currentTab = tab;
   for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.id !== tab;
   for (const item of document.querySelectorAll('[data-tab]')) {
     const active = item.dataset.tab === tab;
@@ -198,7 +276,7 @@ function setTab(tab) {
   const agents = listedAgents().map(agent => {
     const row = el('div', undefined, 'contact-row');
     const copy = el('div');
-    copy.append(el('strong', agent.name), el('small', [agent.alias && '@' + agent.alias, agent.status].filter(Boolean).join(' · ')));
+    copy.append(el('strong', agent.name), el('small', [agent.alias && '@' + agent.alias, agent.model, agent.status].filter(Boolean).join(' · ')));
     row.append(el('span', 'AI', 'avatar'), copy);
     return row;
   });
@@ -296,7 +374,7 @@ function showMessageActions(message) {
     }, 'message-action danger'));
   }
   $('messageActionList').replaceChildren(...actions);
-  dialog.showModal();
+  showDialog(dialog);
 }
 
 function bindMessageActions(element, message) {
@@ -417,7 +495,7 @@ async function openMediaCard(card, sourceRoom) {
     }
     $('attachmentTitle').textContent = name;
     view.replaceChildren(element);
-    dialog.showModal();
+    showDialog(dialog);
     dialog.addEventListener('close', () => {
       view.replaceChildren();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -432,7 +510,7 @@ function renderAttachmentCard(message, sourceRoom) {
   const file = message.attachment;
   const media = message.media;
   const kind = media?.kind || file.previewType?.split('/')[0] || 'file';
-  const name = file?.name || (kind === 'video' ? '百炼视频' : '百炼图片');
+  const name = file?.name || (media?.searchId ? '公开图片 · ' + media.searchId : kind === 'video' ? '百炼视频' : '百炼图片');
   const section = el('section', undefined, 'attachment-card');
   const card = { kind, name, file, url: media?.url };
   if (kind === 'image') {
@@ -464,6 +542,13 @@ function renderAttachmentCard(message, sourceRoom) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     footer.append(link);
+    for (const [index, url] of (media.sources || []).entries()) {
+      const source = el('a', '参考图 ' + (index + 1), 'attachment-open');
+      source.href = url;
+      source.target = '_blank';
+      source.rel = 'noopener noreferrer';
+      footer.append(source);
+    }
   }
   section.append(footer);
   return section;
@@ -523,12 +608,12 @@ function renderRoom() {
       if (source) details.append(el('blockquote', speakerName(source) + '：' + (source.recalled ? '消息已撤回' : (source.text || source.attachment?.name || '').slice(0, 100))));
       if (message.text) {
         const bubble = el('div', undefined, 'bubble');
-        bubble.innerHTML = markdown.render(message.media ? message.text.split('\n\n')[0] : message.text);
+        bubble.innerHTML = markdown.render(message.media && !message.mediaItems?.[0]?.id ? message.text.split('\n\n')[0] : message.text);
         details.append(bubble);
       }
       if (message.agents?.length) details.append(el('small', '共享：' + (message.shared?.length ? '本条及历史 ' + message.shared.length + ' 条' : '仅本条') + ' · ' + message.agents.map(nameOf).join('、')));
       for (const file of attachmentsOf(message)) details.append(renderAttachmentCard({ attachment: file }, roomId));
-      if (message.media) details.append(renderAttachmentCard({ media: message.media }, roomId));
+      for (const media of message.mediaItems || (message.media ? [message.media] : [])) details.append(renderAttachmentCard({ media }, roomId));
       if (message.artifact) {
         const card = el('section', undefined, 'attachment-card');
         const footer = el('div', undefined, 'attachment-meta');
@@ -571,7 +656,7 @@ function renderTasks() {
     if (isActive(task) && task.progress) item.append(el('p', task.progress, 'muted'));
     if (task.error) item.append(el('p', task.error, 'muted'));
     for (const child of room.tasks.filter(child => child.parent === task.id)) {
-      item.append(el('p', nameOf(child.agent) + ' · ' + taskStatus[child.status] + (child.preview ? '：' + child.preview : '')));
+      item.append(el('p', nameOf(child.agent) + ' · ' + taskStatus[child.status]));
     }
     if (isActive(task) && (room.owner === app.user || room.messages.find(message => message.id === task.source)?.sender === app.user)) {
       item.append(button('停止任务', () => change('cancel', { task: task.id })));
@@ -592,7 +677,8 @@ function listedAgents(conversation = null) {
     const activeId = available.find(id => conversation?.tasks?.some(task => task.agent === id && isActive(task)));
     const availableId = memberId || activeId || available[0];
     const id = conversation?.kind === 'team' ? memberId : availableId;
-    return { ...choice, id, availableId, memberId, activeId, status: !availableId ? '未接入' : !id ? '未加入' : '' };
+    const model = app.catalog.find(agent => agent.id === availableId)?.model;
+    return { ...choice, id, availableId, memberId, activeId, model, status: !availableId ? '未接入' : !id ? '未加入' : '' };
   });
 }
 
@@ -641,7 +727,7 @@ function mentions(force = false) {
     option.disabled = !agent.id;
     option.append(el('span', agent.name));
     if (agent.alias && agent.alias !== agent.name.toLowerCase()) option.append(el('small', '@' + agent.alias));
-    if (!agent.id) option.append(el('small', agent.status));
+    if (agent.model || !agent.id) option.append(el('small', [agent.model, !agent.id && agent.status].filter(Boolean).join(' · ')));
     return option;
   }));
   if (!candidates.length) $('mentionList').append(el('p', '没有匹配的 Agent', 'muted'));
@@ -666,7 +752,7 @@ function renderMembers() {
     const status = lead ? '负责人' : agent.memberId ? '已加入' : agent.activeId ? '临时参与' : agent.status;
     const label = el('span', undefined, 'member-agent-copy');
     label.append(el('strong', agent.name));
-    if (agent.alias || status) label.append(el('small', [agent.alias && '@' + agent.alias, status].filter(Boolean).join(' · ')));
+    if (agent.alias || agent.model || status) label.append(el('small', [agent.alias && '@' + agent.alias, agent.model, status].filter(Boolean).join(' · ')));
     line.append(label);
     if (id && (room.kind !== 'group' || room.owner === app.user)) {
       const removing = agent.memberId || agent.activeId;
@@ -689,7 +775,7 @@ async function showArtifact(id) {
     }));
     $('share').disabled = !$('shareDestination').options.length;
     $('preview').src = new URL(result.url.slice(1), document.baseURI);
-    $('previewDialog').showModal();
+    showDialog($('previewDialog'));
   } catch (error) { toast(error.message); }
 }
 
@@ -709,8 +795,8 @@ function downloadFile(blob, name) {
 $('download').onclick = () => downloadFile(new Blob([artifact], { type: 'text/html' }), 'agent-artifact.html');
 $('previewDialog').addEventListener('close', () => { $('preview').removeAttribute('src'); });
 for (const close of document.querySelectorAll('[data-close]')) close.onclick = () => close.closest('dialog').close();
-$('taskButton').onclick = () => { renderTasks(); $('tasksDialog').showModal(); };
-$('memberButton').onclick = () => { renderMembers(); $('membersDialog').showModal(); };
+$('taskButton').onclick = () => { renderTasks(); showDialog($('tasksDialog')); };
+$('memberButton').onclick = () => { renderMembers(); showDialog($('membersDialog')); };
 $('mentionButton').onclick = () => { if ($('mentionList').hidden) mentions(true); else $('mentionList').hidden = true; };
 $('input').oninput = () => { mentions(); renderSelection(); };
 $('input').onkeydown = event => {
@@ -740,7 +826,7 @@ $('composer').onsubmit = async event => {
     const localFiles = draftFiles;
     const quoted = replyDraft;
     const people = [...mentionedPeople].filter(name => text.includes('@' + name + ' '));
-    const message = { text, mentions: people, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id };
+    const message = { text, mentions: people, agents: recipients, scope: $('scope').value, messageIds: contextIds, replyTo: quoted?.id, quoteContextIds };
     let payload = message;
     if (localFiles.length) {
       payload = new FormData();
@@ -763,25 +849,21 @@ $('loginForm').onsubmit = async event => {
   event.preventDefault();
   try {
     const result = await api('login', { name: $('loginName').value, code: $('loginCode').value });
-    token = result.token;
-    sessionStorage.setItem('token', token);
+    useSession(result);
     $('loginCode').value = '';
     await refresh();
   } catch (error) { $('loginError').textContent = error.message; }
 };
-$('logout').onclick = $('mobileLogout').onclick = () => {
-  setTab('inbox');
-  $('workspace').classList.remove('has-room');
-  seen.clear();
-  showLogin();
+$('logout').onclick = $('mobileLogout').onclick = async () => {
+  try {
+    await api('logout', {});
+    setTab('inbox');
+    $('workspace').classList.remove('has-room');
+    seen.clear();
+    showLogin();
+  } catch (error) { toast('暂时无法退出，连接恢复后请重试。'); }
 };
-$('back').onclick = () => {
-  $('workspace').classList.remove('has-room');
-  if (mobile.matches) {
-    room = roomId = null;
-    renderRoomList();
-  }
-};
+$('back').onclick = closeRoom;
 for (const tab of document.querySelectorAll('[data-tab]')) tab.onclick = () => setTab(tab.dataset.tab);
 $('roomSearch').oninput = renderRoomList;
 function createFields() {
@@ -800,7 +882,7 @@ function createFields() {
   }));
 }
 $('roomKind').onchange = createFields;
-$('newRoom').onclick = () => { $('createForm').reset(); createFields(); $('createDialog').showModal(); };
+$('newRoom').onclick = () => { $('createForm').reset(); createFields(); showDialog($('createDialog')); };
 $('createForm').onsubmit = async event => {
   event.preventDefault();
   try {
@@ -810,14 +892,60 @@ $('createForm').onsubmit = async event => {
   } catch (error) { toast(error.message); }
 };
 
-try {
-  const config = await api('config');
-  $('localHint').hidden = !config.local;
-  $('codeLabel').hidden = config.local;
-  if (token) await refresh();
-  else showLogin();
-} catch (error) { showLogin(); toast(error.message); }
+async function restoreSession() {
+  try {
+    const config = await api('config');
+    $('localHint').hidden = !config.local;
+    $('codeLabel').hidden = config.local;
+    let session;
+    try { session = await api('session'); }
+    catch (error) {
+      if (error.status !== 401 || !token) throw error;
+      // A tab may still hold an old token while this browser has a newer remembered session.
+      token = null;
+      sessionStorage.removeItem('token');
+      session = await api('session');
+    }
+    useSession(session);
+    await refresh();
+  } catch (error) {
+    if (error.status === 401) showLogin();
+    else {
+      toast('正在重新连接…');
+      setTimeout(restoreSession, 3000);
+    }
+  }
+}
+await restoreSession();
 setInterval(refresh, 1000);
+
+$('quoteContextButton').onclick = () => {
+  if (!replyDraft) return;
+  const row = (message, quoted = false) => {
+    const label = el('label', undefined, 'quote-context-row');
+    const check = el('input');
+    check.type = 'checkbox';
+    check.value = message.id;
+    check.disabled = quoted;
+    check.checked = quoted || quoteContextIds.includes(message.id);
+    const copy = el('span');
+    copy.append(el('strong', speakerName(message) + (quoted ? ' · 直接引用' : '')),
+      el('span', (message.text || '（无文字）').slice(0, quoted ? 8000 : 2200)));
+    const names = attachmentsOf(message).map(file => file.name);
+    if (message.media || message.mediaItems?.length) names.push('媒体产物');
+    if (names.length) copy.append(el('small', '附件：' + names.join('、')));
+    label.append(check, copy);
+    return label;
+  };
+  $('quoteContextList').replaceChildren(...quoteContext.map(item => row(item)), row(replyDraft, true));
+  showDialog($('quoteContextDialog'));
+};
+$('quoteContextForm').onsubmit = event => {
+  event.preventDefault();
+  quoteContextIds = [...event.currentTarget.querySelectorAll('input:checked:not(:disabled)')].map(input => input.value);
+  renderQuoteContextButton();
+  $('quoteContextDialog').close();
+};
 
 $('scope').onchange = () => {
   if ($('scope').value !== 'selected') return;
@@ -827,7 +955,7 @@ $('scope').onchange = () => {
   const setIndices = () => {
     let current = draftFiles.filter(file => /^image\//.test(file.type)).length;
     const pictureCount = message => attachmentsOf(message || {}).filter(file => file.previewType?.startsWith('image/')).length +
-      Number(message?.media?.kind === 'image');
+      (message?.mediaItems || (message?.media ? [message.media] : [])).filter(item => item.kind === 'image').length;
     current += pictureCount(replyDraft);
     for (const index of indices.values()) index.textContent = '';
     for (const id of historySelection) {
@@ -858,7 +986,7 @@ $('scope').onchange = () => {
     return label;
   }));
   setIndices();
-  $('historyDialog').showModal();
+  showDialog($('historyDialog'));
 };
 $('historyForm').onsubmit = event => {
   event.preventDefault();
@@ -903,7 +1031,7 @@ $('forwardButton').onclick = () => {
     label.append(check, el('span', nameOf(message.sender) + '：' + message.text.slice(0, 75)));
     return label;
   }));
-  $('forwardDialog').showModal();
+  showDialog($('forwardDialog'));
 };
 $('forwardForm').onsubmit = async event => {
   event.preventDefault();

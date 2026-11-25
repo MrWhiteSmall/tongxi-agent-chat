@@ -1,0 +1,8 @@
+<resources>
+    <color name="startup_background">#001037</color>
+    <style name="ChatTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/startup_background</item>
+        <item name="android:statusBarColor">@color/startup_background</item>
+        <item name="android:navigationBarColor">@color/startup_background</item>
+    </style>
+</resources>

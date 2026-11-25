@@ -33,7 +33,7 @@
       <form id="composer">
         <div id="mentionList" hidden></div>
         <div id="selectedAgents"></div>
-        <div id="replyDraft" hidden><span id="replyText"></span><button id="clearReply" type="button" class="quiet" aria-label="取消引用">×</button></div>
+        <div id="replyDraft" hidden><span id="replyText"></span><button id="quoteContextButton" type="button" class="quiet" hidden>引用上下文</button><button id="clearReply" type="button" class="quiet" aria-label="取消引用">×</button></div>
         <div id="fileDraft" hidden><span id="fileName"></span><button id="clearFile" type="button" class="quiet" aria-label="移除附件">×</button></div>
         <textarea id="input" placeholder="输入消息，按 @ 邀请 Agent" rows="2" maxlength="6000" aria-label="消息"></textarea>
         <div class="compose-actions"><label id="attachLabel" class="quiet" title="添加附件">＋附件<input id="fileInput" type="file" multiple hidden></label><button id="mentionButton" type="button" class="quiet" aria-label="选择 Agent">@</button><label id="scopeLabel" hidden>共享给 Agent <select id="scope"><option value="message">仅本条</option><option value="recent">最近 12 条</option><option value="selected">选择历史</option></select></label><button class="primary">发送</button></div>
@@ -54,6 +54,12 @@
 <dialog id="tasksDialog" aria-labelledby="tasksTitle"><h2 id="tasksTitle">当前会话任务</h2><div id="taskPanel"></div><div class="dialog-actions"><button type="button" class="quiet" data-close>关闭</button></div></dialog>
 <dialog id="membersDialog"><h2>会话成员</h2><div id="memberList"></div><div class="dialog-actions"><button class="quiet" data-close>关闭</button></div></dialog>
 <dialog id="previewDialog"><h2>产物预览</h2><iframe id="preview" title="产物预览" sandbox="allow-scripts"></iframe><div class="dialog-actions"><select id="shareDestination" aria-label="分享目标"></select><button id="share" class="quiet">分享</button><button id="download" class="primary">下载 HTML</button><button class="quiet" data-close>关闭</button></div></dialog>
+<dialog id="quoteContextDialog" aria-labelledby="quoteContextTitle"><form id="quoteContextForm">
+  <h2 id="quoteContextTitle">Agent 的引用上下文</h2>
+  <p id="quoteContextHelp" class="muted">直接引用会随消息发送。勾选引用链和前文，让 Agent 看清指代。另选的历史也会按原范围分享。</p>
+  <div id="quoteContextList"></div>
+  <div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button class="primary">应用</button></div>
+</form></dialog>
 <dialog id="historyDialog"><form id="historyForm"><h2>选择要共享的历史</h2><div id="historyList"></div><div class="dialog-actions"><button class="primary">确定</button></div></form></dialog>
 <dialog id="forwardDialog"><form id="forwardForm"><h2>转发到独立 AI 团队</h2><label>目标团队<select id="forwardTarget" required></select></label><div id="forwardList"></div><div class="dialog-actions"><button type="button" class="quiet" data-close>取消</button><button class="primary">转发</button></div></form></dialog>
 <div id="toast" role="status" hidden></div>
